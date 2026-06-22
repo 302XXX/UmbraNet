@@ -1,0 +1,33 @@
+{
+  "xbox_dns_mode": "dot",
+  "tls_verify": true,
+  "provider_failover": true,
+  "fallback_dns": "8.8.8.8",
+  "fallback_dns6": "2001:4860:4860::8888",
+  "listen_port": 53,
+  "listen_host": "127.0.0.1",
+  "listen_host6": "::1",
+  "enable_ipv6": true,
+  "routed_cache_enabled": true,
+  "routed_cache_ttl": 7,
+  "routed_reply_ttl": 30,
+  "upstream_mode": "fastest",
+  "optimistic_cache_enabled": true,
+  "stale_cache_ttl": 86400,
+  "bogus_detection_enabled": true,
+  "bogus_ips_use_builtin": true,
+  "bogus_ips_extra": [],
+  "bogus_subnets_extra": [],
+  "active_dns_profile": "builtin-xbox-dns",
+  "user_dns_profiles": [],
+  "routed_domains": [],
+  "routed_processes": [
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe"
+  ],
+  "route_all": false,
+  "ipv6_priority_enabled": false,
+  "routed_subscriptions": [],
+  "dpi_strategy": "uz1"
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "default": [
+    "youtube",
+    "discord"
+  ],
+  "note": "Домены для YouTube/Discord берутся из core/service_profiles.py. Этот файл задаёт только набор целей генерации и fallback-метаданные.",
+  "targets": {
+    "youtube": {
+      "label": "YouTube",
+      "dpi_testable": true,
+      "requires_ip_change": false,
+      "probe_family": "youtube_media"
+    },
+    "discord": {
+      "label": "Discord",
+      "dpi_testable": true,
+      "requires_ip_change": false,
+      "probe_family": "discord_gateway_cdn_voice_readiness"
+    }
+  }
+}
