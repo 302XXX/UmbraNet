@@ -1,0 +1,23 @@
+{
+  "label": "Deep Forest",
+  "BG": "#050e09",
+  "SIDEBAR": "rgba(8, 24, 15, 0.80)",
+  "CARD": "rgba(12, 36, 22, 0.70)",
+  "CARD_TOP": "rgba(20, 56, 35, 0.40)",
+  "CARD_DARK": "rgba(6, 18, 11, 0.60)",
+  "ROW_BG": "rgba(12, 36, 22, 0.60)",
+  "BORDER": "rgba(62, 224, 137, 0.12)",
+  "INPUT_BG": "rgba(6, 18, 11, 0.70)",
+  "ACCENT": "#3ee089",
+  "ACCENT2": "#10b981",
+  "ACCENT3": "#34dcf0",
+  "GREEN": "#3ee089",
+  "RED": "#ef4444",
+  "YELLOW": "#fbbf24",
+  "ORANGE": "#f59e0b",
+  "PINK": "#ec4899",
+  "TEXT": "#ecfdf5",
+  "SUBTEXT": "#a7f3d0",
+  "MUTED": "#4b5563",
+  "WHITE": "#ffffff"
+}

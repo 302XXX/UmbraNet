@@ -1,0 +1,23 @@
+{
+  "label": "Umbra Neon",
+  "BG": "#06060c",
+  "SIDEBAR": "rgba(13, 13, 20, 0.75)",
+  "CARD": "rgba(18, 18, 30, 0.65)",
+  "CARD_TOP": "rgba(28, 28, 48, 0.40)",
+  "CARD_DARK": "rgba(10, 10, 20, 0.50)",
+  "ROW_BG": "rgba(18, 18, 30, 0.55)",
+  "BORDER": "rgba(255, 255, 255, 0.08)",
+  "INPUT_BG": "rgba(10, 10, 18, 0.60)",
+  "ACCENT": "#8b6dff",
+  "ACCENT2": "#5b9bff",
+  "ACCENT3": "#34dcf0",
+  "GREEN": "#3ee089",
+  "RED": "#ff6478",
+  "YELLOW": "#fbbf24",
+  "ORANGE": "#fb923c",
+  "PINK": "#f259b0",
+  "TEXT": "#edeef5",
+  "SUBTEXT": "#9b9cbd",
+  "MUTED": "#6b6c8f",
+  "WHITE": "#ffffff"
+}

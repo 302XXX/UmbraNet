@@ -1,0 +1,23 @@
+{
+  "label": "Dracula Dark",
+  "BG": "#282a36",
+  "SIDEBAR": "rgba(33, 34, 44, 0.85)",
+  "CARD": "rgba(40, 42, 54, 0.75)",
+  "CARD_TOP": "rgba(68, 71, 90, 0.40)",
+  "CARD_DARK": "rgba(30, 31, 41, 0.60)",
+  "ROW_BG": "rgba(40, 42, 54, 0.65)",
+  "BORDER": "rgba(248, 248, 242, 0.08)",
+  "INPUT_BG": "rgba(30, 31, 41, 0.70)",
+  "ACCENT": "#bd93f9",
+  "ACCENT2": "#8be9fd",
+  "ACCENT3": "#ff79c6",
+  "GREEN": "#50fa7b",
+  "RED": "#ff5555",
+  "YELLOW": "#f1fa8c",
+  "ORANGE": "#ffb86c",
+  "PINK": "#ff79c6",
+  "TEXT": "#f8f8f2",
+  "SUBTEXT": "#6272a4",
+  "MUTED": "#44475a",
+  "WHITE": "#ffffff"
+}
