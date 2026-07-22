@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "default": [
+    "google",
+    "max_ru",
+    "yandex",
+    "gosuslugi"
+  ],
+  "masks": {
+    "google": {
+      "label": "Google",
+      "domains": [
+        "www.google.com",
+        "google.com"
+      ],
+      "risk": "low",
+      "region": "global",
+      "bin": {
+        "tls": "{bin}\\tls_clienthello_www_google_com.bin",
+        "quic": "{bin}\\quic_initial_www_google_com.bin"
+      }
+    },
+    "max_ru": {
+      "label": "Max.ru",
+      "domains": [
+        "max.ru"
+      ],
+      "risk": "low",
+      "region": "ru",
+      "bin": {
+        "tls": "{bin}\\tls_clienthello_max_ru.bin"
+      }
+    },
+    "stun": {
+      "label": "STUN-like",
+      "domains": [
+        "stun.l.google.com"
+      ],
+      "risk": "medium",
+      "region": "global",
+      "bin": {
+        "tls": "{bin}\\stun.bin"
+      }
+    },
+    "yandex": {
+      "label": "Яндекс",
+      "domains": [
+        "ya.ru",
+        "yandex.ru",
+        "yastatic.net"
+      ],
+      "risk": "low",
+      "region": "ru",
+      "bin": {}
+    },
+    "gosuslugi": {
+      "label": "Госуслуги",
+      "domains": [
+        "gosuslugi.ru",
+        "www.gosuslugi.ru"
+      ],
+      "risk": "low",
+      "region": "ru",
+      "bin": {}
+    },
+    "microsoft": {
+      "label": "Microsoft",
+      "domains": [
+        "microsoft.com",
+        "live.com"
+      ],
+      "risk": "low",
+      "region": "global",
+      "bin": {}
+    },
+    "cloudflare": {
+      "label": "Cloudflare",
+      "domains": [
+        "cloudflare.com",
+        "cloudflare-ech.com"
+      ],
+      "risk": "medium",
+      "region": "global",
+      "bin": {}
+    }
+  }
+}
