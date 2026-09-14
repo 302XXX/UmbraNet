@@ -1,0 +1,42 @@
+{
+  "id": "uz1",
+  "name": "Uz1",
+  "description": "ALT11-based safe targeted profile. Цели берутся только из главного меню UmbraNet.",
+  "enabled": true,
+  "args": [
+    "--wf-tcp=80,443,2053,2083,2087,2096,8443",
+    "--wf-udp=443",
+
+    "--filter-udp=443",
+    "{hostlist}",
+    "--dpi-desync=fake",
+    "--dpi-desync-repeats=11",
+    "--dpi-desync-fake-quic={bin}\\quic_initial_www_google_com.bin",
+
+    "--new",
+    "--filter-tcp=443",
+    "{hostlist}",
+    "--ip-id=zero",
+    "--dpi-desync=fake,multisplit",
+    "--dpi-desync-split-seqovl=681",
+    "--dpi-desync-split-pos=1",
+    "--dpi-desync-fooling=ts",
+    "--dpi-desync-repeats=8",
+    "--dpi-desync-split-seqovl-pattern={bin}\\tls_clienthello_www_google_com.bin",
+    "--dpi-desync-fake-tls={bin}\\tls_clienthello_www_google_com.bin",
+
+    "--new",
+    "--filter-tcp=80,443,8443,2053,2083,2087,2096",
+    "{hostlist}",
+    "--dpi-desync=fake,multisplit",
+    "--dpi-desync-split-seqovl=664",
+    "--dpi-desync-split-pos=1",
+    "--dpi-desync-fooling=ts",
+    "--dpi-desync-repeats=8",
+    "--dpi-desync-split-seqovl-pattern={bin}\\tls_clienthello_max_ru.bin",
+    "--dpi-desync-fake-tls={bin}\\stun.bin",
+    "--dpi-desync-fake-tls={bin}\\tls_clienthello_max_ru.bin",
+    "--dpi-desync-fake-http={bin}\\tls_clienthello_max_ru.bin"
+  ],
+  "hostlist": []
+}
