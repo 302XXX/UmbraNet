@@ -89,12 +89,20 @@ def _validate_subnet(raw: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network 
         return None
 
 
-def _parse_remote_json(data: bytes) -> tuple[list[str], list[str]]:
+def _parse_remote_json(data: bytes, *, strict: bool = False) -> tuple[list[str], list[str]]:
     """
     Разбирает JSON из удалённого источника.
     Возвращает (ips: list[str], subnets: list[str]) — только валидные значения.
     Невалидные строки молча дропаются — не ломаем работу из-за одного битого IP.
+
+    strict=True — включает проверку на «слишком маленький» список (защита от
+    битого/куцего JSON с 1 IP, который иначе перезапишет хороший кэш). При
+    strict бросает ValueError, если суммарно валидных записей слишком мало.
     """
+    # H1 guard: не грузим безлимитно огромный JSON (защита от гигантских файлов)
+    if len(data) > 2 * 1024 * 1024:
+        raise ValueError(f"Слишком большой bogus JSON: {len(data)} байт (>2 MB)")
+
     try:
         obj = json.loads(data.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -125,6 +133,14 @@ def _parse_remote_json(data: bytes) -> tuple[list[str], list[str]]:
         else:
             log.debug("Дропнута невалидная подсеть из remote: %r", raw)
 
+    if strict:
+        # H1: требуем минимум полезного контента — иначе не перезаписываем хороший кэш
+        total = len(valid_ips) + len(valid_subnets)
+        if total < 10:
+            raise ValueError(f"Слишком мало bogus записей: {total} (ожидается ≥10)")
+        if len(valid_ips) < 5 and len(valid_subnets) < 2:
+            raise ValueError(f"Подозрительно мало IP ({len(valid_ips)}) и подсетей ({len(valid_subnets)})")
+
     return valid_ips, valid_subnets
 
 
@@ -135,7 +151,7 @@ def _cache_path(config_dir: str) -> str:
 
 
 def _save_cache(config_dir: str, ips: list[str], subnets: list[str]) -> None:
-    """Сохраняет актуальный список на диск для офлайн-запуска."""
+    """Сохраняет актуальный список на диск для офлайн-запуска (атомарно + бэкап)."""
     path = _cache_path(config_dir)
     try:
         payload = {
@@ -147,6 +163,15 @@ def _save_cache(config_dir: str, ips: list[str], subnets: list[str]) -> None:
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
+            # H1: бэкап предыдущего кэша перед атомарной заменой
+            if os.path.exists(path):
+                try:
+                    bak = f"{path}.bak"
+                    # копия, не move — сохраняем предыдущий кэш на случай битья нового
+                    import shutil
+                    shutil.copy2(path, bak)
+                except Exception as exc:
+                    log.debug("Не удалось создать bak кэша: %s", exc)
             os.replace(tmp, path)  # атомарная замена файла
         finally:
             try:
@@ -345,7 +370,7 @@ class BogusUpdater:
         log.debug("BogusUpdater: попытка сетевого обновления с %s", self.url)
         try:
             data = _fetch_remote(self.url, timeout=HTTP_TIMEOUT)
-            net_ips, net_subnets = _parse_remote_json(data)
+            net_ips, net_subnets = _parse_remote_json(data, strict=True)
             if net_ips or net_subnets:
                 ips, subnets = net_ips, net_subnets
                 source = "network"
@@ -405,7 +430,7 @@ class BogusUpdater:
         # Шаг 2: сеть (если доступна — заменяет локальный)
         try:
             data = _fetch_remote(self.url, timeout=HTTP_TIMEOUT)
-            net_ips, net_subnets = _parse_remote_json(data)
+            net_ips, net_subnets = _parse_remote_json(data, strict=True)
             if net_ips or net_subnets:
                 ips, subnets = net_ips, net_subnets
                 source = "network"

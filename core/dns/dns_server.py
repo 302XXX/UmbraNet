@@ -1051,9 +1051,27 @@ class UmbraNetDNS:
             self.config["subscribed_domains_set"] = set()
 
     def update_subscriptions_async(self, on_done=None) -> None:
-        """Запускает фоновое обновление всех подписок из интернета."""
+        """Запускает фоновое обновление всех подписок из интернета.
+
+        H2 limits:
+          • максимум 10 URL
+          • контент ≤ 5 MB на подписку
+          • ≤50k доменов на подписку, ≤100k суммарно
+          • ≤200k строк на подписку
+          • таймаут 10 сек, User-Agent фиксирован
+          • бэкап предыдущего кэша перед записью
+        """
         def _worker():
             urls = list(self.config.get("routed_subscriptions", []) or [])
+            # H2: лимит количества подписок
+            MAX_URLS = 10
+            MAX_CONTENT_BYTES = 5 * 1024 * 1024
+            MAX_PER_SUB = 50_000
+            MAX_TOTAL = 100_000
+            MAX_LINES = 200_000
+            if len(urls) > MAX_URLS:
+                log.warning("Слишком много подписок (%d), берём первые %d", len(urls), MAX_URLS)
+                urls = urls[:MAX_URLS]
             if not urls:
                 self.config["subscribed_domains_set"] = set()
                 path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
@@ -1073,6 +1091,9 @@ class UmbraNetDNS:
 
             for url in urls:
                 log.info("Обновление подписки: %s", url)
+                if len(compiled_domains) >= MAX_TOTAL:
+                    log.warning("Достигнут лимит %d доменов, остальные подписки пропущены", MAX_TOTAL)
+                    break
                 try:
                     from urllib.parse import urlsplit
                     parsed_url = urlsplit(str(url).strip())
@@ -1083,11 +1104,36 @@ class UmbraNetDNS:
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "UmbraNet/1.0 Subscription-Updater"}
                     )
-                    with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310 - http(s) allowlist above
-                        content = resp.read().decode("utf-8", errors="ignore")
+                    # H2: таймаут 10s, лимит размера
+                    with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 - http(s) allowlist above
+                        # проверяем Content-Length заголовок, если есть
+                        clen = resp.headers.get("Content-Length")
+                        if clen is not None:
+                            try:
+                                if int(clen) > MAX_CONTENT_BYTES:
+                                    log.warning("Подписка %s слишком большая (%s байт), пропускаем", url, clen)
+                                    fetch_failed = True
+                                    continue
+                            except Exception:
+                                pass
+                        raw = resp.read(MAX_CONTENT_BYTES + 1)
+                        if len(raw) > MAX_CONTENT_BYTES:
+                            log.warning("Подписка %s превышает лимит %d байт, пропускаем", url, MAX_CONTENT_BYTES)
+                            fetch_failed = True
+                            continue
+                        content = raw.decode("utf-8", errors="ignore")
                     successful_fetches += 1
 
-                    for line in content.splitlines():
+                    per_sub_count = 0
+                    for idx, line in enumerate(content.splitlines()):
+                        if idx >= MAX_LINES:
+                            log.warning("Подписка %s: превышен лимит строк %d, обрезаем", url, MAX_LINES)
+                            break
+                        if per_sub_count >= MAX_PER_SUB:
+                            log.warning("Подписка %s: превышен лимит %d доменов, обрезаем", url, MAX_PER_SUB)
+                            break
+                        if len(compiled_domains) >= MAX_TOTAL:
+                            break
                         # 1) Отрезаем комментарии в конце строки (# или //)
                         line = line.split("#")[0].split("//")[0].strip()
                         if not line:
@@ -1115,7 +1161,9 @@ class UmbraNetDNS:
 
                         # 4) Базовая валидация домена
                         if val and "." in val and not val.endswith("."):
-                            compiled_domains.add(val)
+                            if val not in compiled_domains:
+                                compiled_domains.add(val)
+                                per_sub_count += 1
                 except Exception as exc:
                     fetch_failed = True
                     log.warning("Ошибка при загрузке подписки %s: %s", url, exc)
@@ -1132,6 +1180,13 @@ class UmbraNetDNS:
             path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
             temp_path = f"{path}.{threading.get_ident()}.tmp"
             try:
+                # бэкап предыдущего кэша
+                if os.path.exists(path):
+                    try:
+                        import shutil
+                        shutil.copy2(path, f"{path}.bak")
+                    except Exception:
+                        pass
                 # Атомарная замена не оставляет битый JSON, если приложение
                 # завершится во время записи большого списка доменов.
                 with open(temp_path, "w", encoding="utf-8") as f:
@@ -1442,12 +1497,30 @@ class UmbraNetDNS:
         Все переключения выполняются атомарно: сначала гарантируется
         корректное состояние DNS, затем меняется DPI.
         Возвращает (ok: bool, error_message: str).
+
+        C1 guard: без целей hostlist не должен уходить в эфир.
         """
         VALID = ("dns_only", "combo", "dpi_only")
         if ui_mode not in VALID:
             return False, f"Неизвестный режим '{ui_mode}'. Допустимые: {VALID}"
 
         log.info(f"switch_mode → {ui_mode}")
+
+        # ── C1: переключение разрешено всегда — блокируем только Старт ──
+        if ui_mode in ("combo", "dpi_only"):
+            try:
+                routed = list(self.config.get("routed_domains", []) or [])
+                routed += list(self.config.get("subscribed_domains_set", set()) or [])
+                uniq = set()
+                for x in routed:
+                    s = str(x).strip().lower().rstrip(".")
+                    if not s or "." not in s or " " in s or "/" in s:
+                        continue
+                    uniq.add(s)
+                if not uniq:
+                    log.info("switch_mode(%s): hostlist пуст — разрешаем переключение, Старт будет заблокирован", ui_mode)
+            except Exception as exc:
+                log.debug("hostlist guard check failed: %s", exc)
 
         try:
             # Выбор режима — это настройка, а не команда «Старт».

@@ -50,13 +50,40 @@ def _ensure_backup_dir() -> None:
 
 def _write_json(path: Path, data: dict) -> None:
     _ensure_backup_dir()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Stage 2: атомарная запись через tmp + replace (защита от битого JSON при краше)
+    tmp = path.with_suffix(path.suffix + f".{int(time.time()*1000)}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 def list_snapshots() -> list[Path]:
     if not BACKUP_DIR.exists():
         return []
     return sorted(BACKUP_DIR.glob("network_snapshot_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def prune_old_snapshots(keep: int = 10) -> int:
+    """Удаляет старые снимки, оставляя последние `keep`. Возвращает число удалённых."""
+    snaps = list_snapshots()
+    if len(snaps) <= keep:
+        return 0
+    removed = 0
+    for p in snaps[keep:]:
+        try:
+            p.unlink()
+            removed += 1
+        except Exception as exc:
+            log.debug("prune snapshot %s failed: %s", p, exc)
+    if removed:
+        log.info("prune_old_snapshots: удалено %d старых снимков, осталось %d", removed, keep)
+    return removed
 
 
 def latest_snapshot() -> Path | None:
@@ -120,6 +147,11 @@ def snapshot_network(config: dict | None = None, dns_getter=None, ps_runner=None
     # списках адаптеров и оставляло короткое промежуточное состояние.
     snap["path"] = str(path)
     _write_json(path, snap)
+    # Stage 2: ротация — не даём папке backups/network разрастаться бесконечно
+    try:
+        prune_old_snapshots(keep=10)
+    except Exception:
+        pass
     return snap
 
 

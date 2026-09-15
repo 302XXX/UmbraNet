@@ -49,6 +49,10 @@ DEFAULT_POLL_INTERVAL = 3.0
 # Сколько событий читаем за один опрос (страховка от лавины событий).
 MAX_EVENTS_PER_POLL = 400
 
+# Stage 2 лимиты: защита от разрастания таблиц при route_all / долгой работе
+MAX_DOMAINS_TRACKED = 2000
+MAX_PID_CACHE = 500
+
 
 def _normalize_domain(domain: str) -> str:
     return str(domain or "").rstrip(".").strip().lower()
@@ -272,17 +276,42 @@ class DnsProcessTracker:
         name = resolve_pid(pid)
         name = _normalize_proc(name) if name else None
         if name:
+            # Stage 2: лимит pid-кэша
+            if len(self._pid_cache) >= MAX_PID_CACHE:
+                # удаляем самый старый
+                try:
+                    oldest_pid = min(self._pid_cache, key=lambda k: self._pid_cache[k][1])
+                    self._pid_cache.pop(oldest_pid, None)
+                except Exception:
+                    self._pid_cache.clear()
             self._pid_cache[pid] = (name, now)
         return name
 
     def _record(self, domain: str, exe: str):
         now = time.monotonic()
         with self._lock:
+            # Stage 2: лимит размера таблицы — выкидываем самые старые домены
+            if len(self._table) >= MAX_DOMAINS_TRACKED and domain not in self._table:
+                # удаляем самый старый домен (по самому свежему exe ts внутри)
+                try:
+                    oldest = min(self._table.items(), key=lambda kv: min(kv[1].values()) if kv[1] else float("inf"))
+                    self._table.pop(oldest[0], None)
+                except Exception:
+                    # fallback — удаляем произвольный
+                    try:
+                        self._table.pop(next(iter(self._table)))
+                    except Exception:
+                        pass
             procs = self._table.get(domain)
             if procs is None:
                 procs = {}
                 self._table[domain] = procs
             procs[exe] = now
+            # ограничиваем кол-во exe на домен (обычно 1-2, но на всякий)
+            if len(procs) > 5:
+                # оставляем 5 самых свежих
+                for old_exe in sorted(procs, key=lambda k: procs[k])[:-5]:
+                    procs.pop(old_exe, None)
 
     def _prune(self):
         now = time.monotonic()

@@ -29,7 +29,15 @@ def is_admin() -> bool:
         return os.geteuid() == 0
 
 
+# Stage 2: лёгкий кэш на 2 сек — health_score и трекер дёргают часто
+_PROC_CACHE = {"ts": 0.0, "data": []}
+_PROC_CACHE_TTL = 2.0
+
 def get_running_processes() -> list:
+    # быстрый возврат из кэша, чтобы не ддосить psutil каждый опрос health_score
+    now = time.monotonic()
+    if now - _PROC_CACHE["ts"] < _PROC_CACHE_TTL and _PROC_CACHE["data"]:
+        return list(_PROC_CACHE["data"])
     procs = []
     # Забираем только pid и name, потому что exe требует прав админа 
     # на многие процессы и вызов WMI работает очень долго, вызывая зависания UI!
@@ -41,6 +49,8 @@ def get_running_processes() -> list:
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+    _PROC_CACHE["ts"] = now
+    _PROC_CACHE["data"] = list(procs)
     return procs
 
 
@@ -149,11 +159,19 @@ def get_active_adapters() -> list:
     return [line.strip() for line in stdout.splitlines() if line.strip()]
 
 
-def get_current_dns() -> dict:
+# Stage 2: кэш текущих DNS на 5 сек — health_score + leak check дергают часто
+_DNS_CACHE = {"ts": 0.0, "data": {}}
+_DNS_CACHE_TTL = 5.0
+
+def get_current_dns(use_cache: bool = True) -> dict:
     """
     Возвращает текущие DNS для всех адаптеров (IPv4 и IPv6).
     Формат: {'AdapterName': {'ipv4': [...], 'ipv6': [...]}}
     """
+    if use_cache:
+        now = time.monotonic()
+        if now - _DNS_CACHE["ts"] < _DNS_CACHE_TTL and _DNS_CACHE["data"]:
+            return dict(_DNS_CACHE["data"])
     result = {}
 
     active_filter = (
@@ -196,6 +214,9 @@ def get_current_dns() -> dict:
                     result[name] = {'ipv4': [], 'ipv6': []}
                 result[name]['ipv6'] = [ip.strip() for ip in ips.split(',') if ip.strip()]
 
+    if use_cache:
+        _DNS_CACHE["ts"] = time.monotonic()
+        _DNS_CACHE["data"] = dict(result)
     return result
 
 

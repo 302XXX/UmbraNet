@@ -18,6 +18,7 @@ IPv6-утечку частой причиной «ChatGPT/Gemini не работ
 
 import logging
 import sys
+import time
 
 from config_utils import _to_bool
 
@@ -90,8 +91,22 @@ def _default_runner():
     return _run_ps
 
 
+# ── Кэш последнего результата (защита от частых опросов Health Score) ───────
+_LEAK_CACHE: dict = {"ts": 0.0, "key": None, "result": None}
+_LEAK_CACHE_TTL = 5.0  # сек, достаточно чтобы Health Score не ддосил TCP-проверку
+
+def _leak_cache_key(config: dict, server_running: bool, dpi_running: bool) -> tuple:
+    # ключ = то, что меняет вердикт без сети: адаптеры могут меняться, но их
+    # читает get_dns() внутри — кэшируем и их с ttl, считаем что за 5 сек не устареет критично
+    return (
+        bool(server_running),
+        bool(dpi_running),
+        str(config.get("dpi_mode", "off")),
+        bool(_to_bool(config.get("enable_ipv6", True), True)),
+    )
+
 def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False, ps_runner=None,
-                   dns_getter=None) -> dict:
+                   dns_getter=None, use_cache: bool = True) -> dict:
     """Главная проверка утечек DNS и обхода DPI. Возвращает словарь:
 
         {
@@ -114,6 +129,17 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
             "dns_leak": False,
             "dpi_issue": False,
         }
+
+    # ── Fast cache (Stage 2: не ддосим PowerShell/TCP на каждый health_score) ──
+    if use_cache and ps_runner is None and dns_getter is None:
+        try:
+            now = time.monotonic()
+            key = _leak_cache_key(config, server_running, dpi_running)
+            cached = _LEAK_CACHE
+            if cached["result"] is not None and cached["key"] == key and (now - cached["ts"]) < _LEAK_CACHE_TTL:
+                return cached["result"]
+        except Exception:
+            pass
 
     run = ps_runner or _default_runner()
     get_dns = dns_getter or _default_dns_getter()
@@ -156,6 +182,8 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
                 )
 
     # ── 3) Проверка обхода DPI (DPI Leak Check) ──
+    # Stage 2: DPI-проверка теперь 1.5s вместо 2.5s и только при запущенном DPI движке;
+    # без кэша health_score ддосил сеть каждый опрос.
     dpi_mode = config.get("dpi_mode", "off")
     if dpi_mode != "off" and server_running:
         if dpi_running:
@@ -172,8 +200,8 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
             
             import socket
             try:
-                # Быстрый TCP коннект на 443 порт (через DPI обход!)
-                s = socket.create_connection((target, 443), timeout=2.5)
+                # Быстрый TCP коннект на 443 порт (через DPI обход!) — 1.5s достаточно
+                s = socket.create_connection((target, 443), timeout=1.5)
                 s.close()
                 details.append(f"Обход DPI успешно проверен на домене «{target}». Соединение установлено.")
             except Exception:
@@ -190,7 +218,7 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
     risks = dns_risks + dpi_risks
     if not risks:
         title = "✅ Утечек DNS/DPI не обнаружено"
-        return {
+        result = {
             "status": LEAK_OK,
             "title": title,
             "details": details,
@@ -200,6 +228,14 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
             "dns_leak": False,
             "dpi_issue": False,
         }
+        if use_cache:
+            try:
+                _LEAK_CACHE["ts"] = time.monotonic()
+                _LEAK_CACHE["key"] = _leak_cache_key(config, server_running, dpi_running)
+                _LEAK_CACHE["result"] = result
+            except Exception:
+                pass
+        return result
 
     # есть риски или сбои. Авто-исправление имеет смысл только для DNS/IPv6,
     # а не для DPI-ошибок (DPI чинится сменой режима/стратегии/WinWS).
@@ -213,7 +249,7 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
         fix_hint = "Рекомендация: нажмите «Исправить» для ликвидации DNS/IPv6-утечек."
     else:
         fix_hint = "DNS-утечек не видно. Для DPI-проблемы проверьте запуск WinWS или смените стратегию."
-    return {
+    result = {
         "status": LEAK_RISK,
         "title": "⚠ Обнаружены утечки DNS или блокировки DPI",
         "details": risks,
@@ -223,6 +259,14 @@ def check_dns_leak(config: dict, server_running: bool, dpi_running: bool = False
         "dns_leak": bool(dns_risks),
         "dpi_issue": bool(dpi_risks),
     }
+    if use_cache:
+        try:
+            _LEAK_CACHE["ts"] = time.monotonic()
+            _LEAK_CACHE["key"] = _leak_cache_key(config, server_running, dpi_running)
+            _LEAK_CACHE["result"] = result
+        except Exception:
+            pass
+    return result
 
 
 def _default_dns_getter():
