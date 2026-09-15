@@ -171,7 +171,19 @@ def switch_mode(ui_mode: str) -> tuple:
 
     Возвращает (ok: bool, error: str). UI вызывает только этот метод
     для смены режима — не трогает start()/stop()/set_dpi_mode() напрямую.
+
+    C1 guard: раньше Combo/DPI Only без целей блокировались на переключении.
+    Теперь переключение разрешено всегда — блокируется только Старт (кнопка
+    серая + диалог), чтобы пользователь мог спокойно листать режимы без выбранных
+    доменов, но не мог запустить программу впустую.
     """
+    # ── C1: переключение режимов теперь ВСЕГДА разрешено ──────────────────
+    if ui_mode in ("combo", "dpi_only"):
+        try:
+            if not get_dpi_targets():
+                log.info("switch_mode(%s): hostlist пуст — переключение разрешено, но Старт будет заблокирован", ui_mode)
+        except Exception:
+            pass
     eng = get_engine()
     try:
         ok, err = eng.switch_mode(ui_mode)
@@ -186,6 +198,7 @@ def switch_mode(ui_mode: str) -> tuple:
         # Ядро старой версии без switch_mode — graceful fallback
         log.warning("switch_mode недоступен в ядре, используем ручное переключение")
         try:
+            # fallback тоже разрешает переключение без целей — старт заблокируем отдельно
             MODE_MAP = {"dns_only": "off", "combo": "combo", "dpi_only": "zapret"}
             dpi_mode = MODE_MAP.get(ui_mode, "off")
             eng.set_dpi_mode(dpi_mode)
@@ -219,6 +232,45 @@ def get_current_mode() -> str:
         return "dns_only"
     except Exception:
         return "dns_only"
+
+
+# ── DPI hostlist guard (C1: «Не стрелять себе в ногу») ───────────────────────
+def _normalize_dpi_targets(cfg: dict) -> list[str]:
+    """Возвращает уникальный нормализованный список DPI-целей."""
+    raw = list(cfg.get("routed_domains", []) or [])
+    raw += list(cfg.get("subscribed_domains_set", set()) or [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in raw:
+        s = str(x).strip().lower().rstrip(".")
+        if not s or "." not in s or " " in s or "/" in s:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def get_dpi_targets(cfg: dict | None = None) -> list[str]:
+    """Публичный helper: список DPI-целей текущего или переданного конфига."""
+    try:
+        c = cfg if cfg is not None else getattr(get_engine(), "config", {}) or {}
+        return _normalize_dpi_targets(c)
+    except Exception:
+        return []
+
+
+def count_dpi_targets(cfg: dict | None = None) -> int:
+    """Количество уникальных DPI-целей."""
+    return len(get_dpi_targets(cfg))
+
+
+def _dpi_guard_error_text() -> str:
+    return (
+        "Для режимов Combo / DPI Only нужны цели: включите хотя бы один сервис "
+        "или добавьте домен в «Маршрутизация» → «Все активные домены». "
+        "Без целей WinWS не должен касаться всего трафика."
+    )
 
 
 # ── Вспомогательные функции ядра (через адаптер, с мягким фолбэком) ──────────

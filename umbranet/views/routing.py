@@ -511,6 +511,21 @@ class RoutingView(QWidget):
         save_config(self.engine.config)
         # Сбрасываем кеш списка — данные изменились
         self._manual_list_key = None
+        # Сообщаем шапке что хостлист изменился — Старт может стать серым/активным
+        try:
+            from umbranet.engine_adapter import post_event
+            post_event({"type": "config_changed", "section": "routing"})
+        except Exception:
+            pass
+        # Мгновенно обновляем кнопку Старт в шапке (не ждём 200мс таймера)
+        try:
+            from PySide6.QtWidgets import QApplication
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "_update_start_button"):
+                    w._update_start_button()
+                    break
+        except Exception:
+            pass
 
         if self.engine.running:
             self._restart_dns_after_route_change()
@@ -610,6 +625,11 @@ class RoutingView(QWidget):
             self._apply()
 
     def _remove(self, name: str, key: str):
+        # Защищаем дефолтные процессы — их удаление ломает per-app маршрутизацию
+        PROTECTED_PROCESSES = {"chrome.exe", "msedge.exe", "firefox.exe"}
+        if key == "routed_processes" and name.lower() in PROTECTED_PROCESSES:
+            # Тихо игнорируем — не даём удалить, чтобы не было проблем
+            return
         if name in self.engine.config.get(key, []):
             self.engine.config[key].remove(name)
         self._apply()
@@ -734,6 +754,17 @@ class RoutingView(QWidget):
                 result[d] = svc
         return result
 
+    def _ensure_default_processes(self):
+        """Гарантирует что chrome/msedge/firefox всегда в списке (защита от случайного удаления)."""
+        try:
+            cfg = self.engine.config
+            procs = cfg.setdefault("routed_processes", [])
+            for need in ("chrome.exe", "msedge.exe", "firefox.exe"):
+                if need not in procs and need.lower() not in [x.lower() for x in procs]:
+                    procs.append(need)
+        except Exception:
+            pass
+
     def _rebuild_manual_list(self, filter_text: str = ""):
         """Показывает ВСЕ активные домены, процессы и подписки.
 
@@ -745,6 +776,7 @@ class RoutingView(QWidget):
         Кешируем последний набор данных — обновляем канвас только если
         содержимое реально изменилось (фильтр в канвасе, не здесь).
         """
+        self._ensure_default_processes()
         cfg = self.engine.config
         domain_to_svc = self._build_domain_to_service()
 

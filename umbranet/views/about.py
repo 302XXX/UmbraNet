@@ -14,6 +14,7 @@ from importlib import metadata
 from PySide6.QtCore import Qt, qVersion
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from umbranet import __version__, theme
+from umbranet.widgets.rounded_panel import RoundedPanel
 from umbranet import engine_adapter as ea
 
 _PACKAGE_NAMES = {
@@ -45,9 +47,8 @@ def _pkg_version(dist_name: str) -> str:
         return "не установлен"
 
 
-def _card(title: str = "") -> tuple[QFrame, QVBoxLayout]:
-    f = QFrame()
-    f.setStyleSheet(f"QFrame{{{theme.card_qss(16)}}}")
+def _card(title: str = "") -> tuple[QWidget, QVBoxLayout]:
+    f = RoundedPanel(theme.CARD, theme.BORDER, radius=14)
     lay = QVBoxLayout(f)
     lay.setContentsMargins(16, 14, 16, 14)
     lay.setSpacing(10)
@@ -86,6 +87,10 @@ class AboutView(QWidget):
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + theme.scrollbar_qss())
 
         body = QWidget()
+        try:
+            body.setAttribute(Qt.WA_StaticContents, True)
+        except Exception:
+            pass
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(14)
@@ -127,11 +132,21 @@ class AboutView(QWidget):
             "журнал запросов и диагностика проблем доступа."
         )
         desc.setWordWrap(True)
+        desc.setFixedHeight(40)
+        try:
+            desc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         desc.setStyleSheet(f"color:{theme.SUBTEXT};font-size:13px;background:transparent;border:none;")
         lay.addWidget(desc)
 
         privacy = QLabel("🔒 Все настройки и журналы хранятся локально в папке программы.")
         privacy.setWordWrap(True)
+        privacy.setFixedHeight(18)
+        try:
+            privacy.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         privacy.setStyleSheet(f"color:{theme.ACCENT3};font-size:12px;background:transparent;border:none;")
         lay.addWidget(privacy)
         return card
@@ -147,19 +162,26 @@ class AboutView(QWidget):
 
     def _build_help(self) -> QFrame:
         card, lay = _card("💡  Где что находится")
-        items = [
-            ("Маршрутизация", "Включайте сервисы и домены, которые должны идти через обход."),
-            ("Сеть и диагностика", "Проверяйте DNS, утечки, доступность сервисов и причину, почему сайт не открывается."),
-            ("DNS-профили", "Настраивайте провайдеров и защищённые транспорты: DoH, DoT, DoQ, DNSCrypt."),
-            ("Логи", "Смотрите живые DNS-запросы и системные логи, добавляйте домены в обход, blocklist или allowlist."),
-            ("Настройки", "Порт DNS, IPv6, кэш, bogus-IP и ручная DNS-фильтрация."),
+        # Один QLabel вместо 5 — в 4× меньше heightForWidth пересчётов при ресайзе
+        rows = [
+            "<b>Маршрутизация</b> — Включайте сервисы и домены, которые должны идти через обход.",
+            "<b>Сеть и диагностика</b> — Проверяйте DNS, утечки, доступность сервисов и причину, почему сайт не открывается.",
+            "<b>DNS-профили</b> — Настраивайте провайдеров и защищённые транспорты: DoH, DoT, DoQ, DNSCrypt.",
+            "<b>Логи</b> — Смотрите живые DNS-запросы и системные логи, добавляйте домены в обход, blocklist или allowlist.",
+            "<b>Настройки</b> — Порт DNS, IPv6, кэш, bogus-IP и ручная DNS-фильтрация.",
         ]
-        for name, text in items:
-            row = QLabel(f"<b>{name}</b> — {text}")
-            row.setTextFormat(Qt.RichText)
-            row.setWordWrap(True)
-            row.setStyleSheet(f"color:{theme.TEXT};font-size:12px;background:transparent;border:none;")
-            lay.addWidget(row)
+        txt = "<br>".join(f"<div style='margin:4px 0;'>{r}</div>" for r in rows)
+        lab = QLabel(txt)
+        lab.setTextFormat(Qt.RichText)
+        lab.setWordWrap(True)
+        # Фикс — убирает повторные heightForWidth на каждый пиксель
+        lab.setFixedHeight(110)
+        try:
+            lab.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        lab.setStyleSheet(f"color:{theme.TEXT};font-size:12px;background:transparent;border:none;")
+        lay.addWidget(lab)
         return card
 
     def _build_tech(self) -> QFrame:
@@ -206,7 +228,8 @@ class AboutView(QWidget):
         k = QLabel(key)
         k.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         v = QLabel(str(value))
-        v.setWordWrap(True)
+        # Без wordWrap — фиксированная высота, нет heightForWidth при ресайзе
+        v.setWordWrap(False)
         color = theme.TEXT
         if ok is True:
             color = theme.GREEN

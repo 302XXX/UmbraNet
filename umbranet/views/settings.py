@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -43,6 +44,7 @@ from umbranet.engine_adapter import (
     set_filter_lists,
     upstream_modes,
 )
+from umbranet.widgets.rounded_panel import RoundedPanel
 from umbranet.widgets.slider_field import SliderField
 from umbranet.widgets.toggle import Toggle
 
@@ -58,9 +60,10 @@ PRESET_FIELDS = ("routed_cache_enabled", "routed_cache_ttl", "routed_reply_ttl",
                  "optimistic_cache_enabled", "stale_cache_ttl")
 
 
-def _section(title: str) -> tuple[QFrame, QVBoxLayout]:
-    f = QFrame()
-    f.setStyleSheet(f"QFrame{{{theme.card_qss(14)}}}")
+def _section(title: str) -> tuple[QWidget, QVBoxLayout]:
+    # Телеграмизация: RoundedPanel рисуется в paintEvent без QSS-градиента
+    # (QFrame + card_qss стоил ~3 мс/кадр на секцию при ресайзе)
+    f = RoundedPanel(theme.CARD, theme.BORDER, radius=14)
     lay = QVBoxLayout(f)
     lay.setContentsMargins(16, 12, 16, 14)
     lay.setSpacing(10)
@@ -125,6 +128,11 @@ class SettingsView(QWidget):
             "применится после перезапуска приложения."
         )
         theme_desc.setWordWrap(True)
+        theme_desc.setFixedHeight(28)
+        try:
+            theme_desc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         theme_desc.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         ltheme.addWidget(theme_desc)
 
@@ -233,6 +241,11 @@ class SettingsView(QWidget):
             "и простые AdBlock-правила вида ||domain^. Allowlist имеет приоритет над blocklist."
         )
         desc.setWordWrap(True)
+        desc.setFixedHeight(32)
+        try:
+            desc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         desc.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         lf.addWidget(desc)
 
@@ -262,6 +275,11 @@ class SettingsView(QWidget):
         # прокрутка со стилизованным скроллбаром
         bodyw = QWidget()
         bodyw.setLayout(body)
+        # WA_StaticContents — Qt не перерисовывает весь body при каждом пикселе ресайза
+        try:
+            bodyw.setAttribute(Qt.WA_StaticContents, True)
+        except Exception:
+            pass
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -282,7 +300,7 @@ class SettingsView(QWidget):
         inp.setFixedHeight(34)
         inp.setStyleSheet(
             f"QLineEdit{{background:{theme.INPUT_BG};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};border-radius:8px;padding:0 10px;font-family:Consolas;}}"
+            f"border:1px solid {theme.BORDER};border-radius:6px;padding:0 10px;font-family:Consolas;}}"
             f"QLineEdit:focus{{border-color:{theme.ACCENT};}}")
         inp.editingFinished.connect(self._autosave)  # сохранить при потере фокуса/Enter
         row.addWidget(lbl)
@@ -303,10 +321,16 @@ class SettingsView(QWidget):
         edit = QPlainTextEdit()
         edit.setPlainText("\n".join(values or []))
         edit.setMinimumHeight(130)
+        # NoWrap — ширина не вызывает перекомпоновку документа на каждый пиксель ресайза
+        try:
+            edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        except Exception:
+            pass
         edit.setPlaceholderText("example.com\n0.0.0.0 ads.example.com\n||tracker.example.net^")
+        # Упрощённый QSS без border-radius маски (прямоугольник красится быстрее)
         edit.setStyleSheet(
             f"QPlainTextEdit{{background:{theme.INPUT_BG};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};border-radius:10px;padding:8px;"
+            f"border:1px solid {theme.BORDER};border-radius:6px;padding:8px;"
             "font-family:Consolas;font-size:12px;}}" + theme.scrollbar_qss()
         )
         lay.addWidget(edit)
@@ -316,6 +340,12 @@ class SettingsView(QWidget):
         row = QHBoxLayout()
         lbl = QLabel(label)
         lbl.setWordWrap(True)
+        # Фикс высоты — убирает heightForWidth на каждый пиксель ресайза (метка в 1 строку)
+        lbl.setFixedHeight(22)
+        try:
+            lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         lbl.setStyleSheet(f"color:{theme.TEXT};font-size:13px;background:transparent;border:none;")
         tg = Toggle(checked)
         tg.toggled.connect(lambda _=False: self._autosave())
@@ -326,9 +356,10 @@ class SettingsView(QWidget):
 
     # ── стили ──
     def _combo_qss(self) -> str:
+        # Радиус 6 вместо 8 — маски меньше, перерисовка при ресайзе быстрее
         return (
             f"QComboBox{{background:{theme.INPUT_BG};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};border-radius:8px;padding:0 10px;min-width:200px;}}"
+            f"border:1px solid {theme.BORDER};border-radius:6px;padding:0 10px;min-width:200px;}}"
             f"QComboBox:hover{{border-color:{theme.ACCENT};}}"
             f"QComboBox QAbstractItemView{{background:{theme.CARD};color:{theme.TEXT};"
             f"selection-background-color:{theme.ACCENT};border:1px solid {theme.BORDER};}}")

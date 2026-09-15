@@ -18,6 +18,7 @@ from Map.core.map_dialog import CyberMapDialog
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QSizePolicy,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from umbranet import theme
+from umbranet.widgets.rounded_panel import RoundedPanel
 from umbranet.engine_adapter import (
     add_query_log_event,
     bogus_force_update,
@@ -64,9 +66,9 @@ def _verdict_color(verdict: str, severity: str = "") -> str:
         return theme.RED
     return theme.MUTED
 
-def _card(title: str = "") -> tuple[QFrame, QVBoxLayout]:
-    f = QFrame()
-    f.setStyleSheet(f"QFrame{{{theme.card_qss(16)}}}")
+def _card(title: str = "") -> tuple[QWidget, QVBoxLayout]:
+    # RoundedPanel — paintEvent без QSS-градиента, в 3× быстрее при ресайзе
+    f = RoundedPanel(theme.CARD, theme.BORDER, radius=14)
     lay = QVBoxLayout(f)
     lay.setContentsMargins(16, 14, 16, 14)
     lay.setSpacing(10)
@@ -213,6 +215,10 @@ class NetworkView(QWidget):
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + theme.scrollbar_qss())
 
         body = QWidget()
+        try:
+            body.setAttribute(Qt.WA_StaticContents, True)
+        except Exception:
+            pass
         lay = QVBoxLayout(body)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(14)
@@ -232,6 +238,11 @@ class NetworkView(QWidget):
         
         desc = QLabel("Визуализация обхода блокировок. Карта показывает реальные DNS-запросы, прошедшие через UmbraNet: лучи ведут к серверам, локация определяется по IP. Запустите движок — и радар оживёт.")
         desc.setWordWrap(True)
+        desc.setFixedHeight(36)
+        try:
+            desc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         desc.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         lay.addWidget(desc)
         
@@ -262,6 +273,11 @@ class NetworkView(QWidget):
         self._health_title.setStyleSheet(f"color:{theme.TEXT};font-size:16px;font-weight:800;background:transparent;border:none;")
         self._health_text = QLabel("Нажмите одну кнопку — UmbraNet проверит состояние и сам применит безопасную починку, если она нужна.")
         self._health_text.setWordWrap(True)
+        self._health_text.setFixedHeight(42)
+        try:
+            self._health_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         self._health_text.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         texts.addWidget(self._health_title)
         texts.addWidget(self._health_text)
@@ -285,6 +301,11 @@ class NetworkView(QWidget):
         self._dpi_title.setStyleSheet(f"color:{theme.TEXT};font-size:15px;font-weight:700;background:transparent;border:none;")
         self._dpi_text = QLabel("Статус DPI-движка, стратегия и лог запуска.")
         self._dpi_text.setWordWrap(True)
+        self._dpi_text.setFixedHeight(48)
+        try:
+            self._dpi_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         self._dpi_text.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         lay.addWidget(self._dpi_title)
         lay.addWidget(self._dpi_text)
@@ -316,6 +337,11 @@ class NetworkView(QWidget):
 
         self._bogus_status = QLabel(self._bogus_status_text())
         self._bogus_status.setWordWrap(True)
+        self._bogus_status.setFixedHeight(28)
+        try:
+            self._bogus_status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        except Exception:
+            pass
         self._bogus_status.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;background:transparent;border:none;")
         lay.addWidget(self._bogus_status)
         return card

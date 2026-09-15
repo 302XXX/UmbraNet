@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -20,12 +21,14 @@ from PySide6.QtWidgets import (
 from umbranet import theme
 from umbranet.widgets.live_resize import LiveResizeFreezer
 from umbranet.engine_adapter import (
+    count_dpi_targets,
     dpi_strategy_ai_cleanup_runtime,
     dpi_strategy_ai_plan,
     dpi_strategy_ai_run_controlled,
     dpi_strategy_check_all_controlled,
     drain_events,
     get_current_mode,
+    get_dpi_targets,
     get_engine,
     get_nav_order,
     get_startup_health,
@@ -515,6 +518,11 @@ class MainWindow(GlowContainer):
         self.control.stopClicked.connect(self._on_stop)
         self.control.restartClicked.connect(self._on_restart)
         row.addWidget(self.control)
+        # Инициализируем серую кнопку Старт если целей нет
+        try:
+            self._update_start_button()
+        except Exception:
+            pass
         lay.addLayout(row)
 
         self.health_banner = QLabel()
@@ -585,7 +593,12 @@ class MainWindow(GlowContainer):
             "red":   "dpi_only",
         }
         ui_mode = UI_KEY_TO_MODE.get(ui_key, "dns_only")
-        
+
+        # C1 guard убран с переключения: теперь режимы переключаются всегда,
+        # даже если список целей пуст. Блокируется только кнопка Старт
+        # (серая + диалог), чтобы пользователь мог листать режимы, но не
+        # запустить пустую конфигурацию.
+
         # Если пытаемся сменить режим пока программа работает - просто останавливаем ее
         if self.engine.running:
             self._on_stop()
@@ -597,17 +610,123 @@ class MainWindow(GlowContainer):
                 get_current_mode(), "blue"
             )
             self.mode_switch.set_active(actual_key)
+            # Если причина — пустой hostlist, показываем дружелюбный диалог
+            if err and ("цели" in err.lower() or "hostlist" in err.lower() or "маршрутизация" in err):
+                self._show_dpi_guard_dialog(err)
         self._update_mode_hint()
         QTimer.singleShot(400, self._update_startup_health)
-        
+
         # Обновляем все UI-компоненты (вкладку Маршрутизация и т.д.),
         # чтобы они переключились с DNS-маршрутов на DPI-стратегии.
         self._refresh_views()
+
+    def _show_dpi_guard_dialog(self, custom_text: str | None = None):
+        """Диалог C1: объясняет, почему DPI без целей не включается."""
+        text = custom_text or (
+            "Для режимов <b>Combo / DPI Only</b> нужны цели DPI.<br><br>"
+            "Включите хотя бы один сервис в <b>Маршрутизация</b> "
+            "(например, YouTube, Discord, ChatGPT) или добавьте домен вручную "
+            "в блоке «Все активные домены».<br><br>"
+            "Без целей WinWS не должен касаться всего трафика — это защита "
+            "от «стрельбы себе в ногу»."
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Нужны цели DPI")
+        box.setIcon(QMessageBox.Warning)
+        box.setTextFormat(Qt.RichText)
+        box.setText(text)
+        go_btn = box.addButton("Перейти в Маршрутизация", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() == go_btn:
+            try:
+                self._show("routing")
+                self.sidebar.set_active("routing")
+            except Exception:
+                pass
+        # Подсветка Health-баннера
+        try:
+            self.health_banner.setText(
+                "⚠ <b>DPI-цели не выбраны</b>: включите сервисы/домены в «Маршрутизация», затем снова выберите Combo/DPI Only."
+            )
+            self.health_banner.setStyleSheet(
+                f"QLabel{{background:rgba(251, 191, 36, 0.14); color:{theme.TEXT};"
+                f"border:1px solid {theme.YELLOW}; border-radius:10px;"
+                f"padding:8px 10px; font-size:12px;}}"
+            )
+            self.health_banner.setVisible(True)
+        except Exception:
+            pass
+
+    # ── Новый C1: блок Старта без целей (вместо блока переключения) ──
+    def _can_start(self) -> bool:
+        """Можно ли нажать Старт? Требует хотя бы один ДОМЕН/сервис в главном меню.
+
+        ВАЖНО: процессы chrome.exe / firefox.exe / msedge.exe — дефолтные,
+        их НЕ считаем. Они нужны для per-app маршрутизации, но не должны
+        давать зелёный Старт без выбранного сервиса/домена. Иначе кнопка
+        никогда не станет серой, т.к. процессы есть всегда.
+        """
+        try:
+            return count_dpi_targets() > 0
+        except Exception:
+            return True
+
+    def _show_start_guard_dialog(self):
+        """Диалог при попытке старта без выбранных доменов/сервисов."""
+        text = (
+            "Выберите хотя бы один сервис в <b>Маршрутизация</b> перед запуском.<br><br>"
+            "Включите нужные сервисы (например, YouTube, Discord, ChatGPT) "
+            "или добавьте домен вручную в «Все активные домены».<br><br>"
+            "Без целей запускать UmbraNet бессмысленно — нечего обходить."
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Выберите сервис")
+        box.setIcon(QMessageBox.Warning)
+        box.setTextFormat(Qt.RichText)
+        box.setText(text)
+        go_btn = box.addButton("Перейти в Маршрутизация", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() == go_btn:
+            try:
+                self._show("routing")
+                self.sidebar.set_active("routing")
+            except Exception:
+                pass
+        # Подсветка баннера
+        try:
+            self.health_banner.setText(
+                "⚠ <b>Не выбран ни один сервис</b>: включите хотя бы один сервис в «Маршрутизация», затем нажмите Старт."
+            )
+            self.health_banner.setStyleSheet(
+                f"QLabel{{background:rgba(251, 191, 36, 0.14); color:{theme.TEXT};"
+                f"border:1px solid {theme.YELLOW}; border-radius:10px;"
+                f"padding:8px 10px; font-size:12px;}}"
+            )
+            self.health_banner.setVisible(True)
+        except Exception:
+            pass
+
+    def _update_start_button(self):
+        """Делает кнопку Старт серой, если нет выбранных целей."""
+        try:
+            can = self._can_start()
+            # running-процесс не трогаем — Стоп всегда активен
+            if hasattr(self, "control") and self.control:
+                self.control.set_can_start(can)
+        except Exception:
+            pass
 
     # ── ФИХ #3 + #6: старт/стоп/рестарт через фоновый поток ──
     def _start_action(self, action: str):
         """Запускает action в фоновом потоке с блокировкой повторных кликов."""
         if self._busy:
+            return
+        # Блок Старта без целей — вместо блока переключения режимов
+        if action in ("start", "restart") and not self._can_start():
+            self._show_start_guard_dialog()
+            self._update_start_button()
             return
         # Явный пользовательский Stop должен отменять любые фоновые мягкие
         # restart-задачи из вкладок. Иначе worker маршрутизации мог остановить
@@ -631,6 +750,10 @@ class MainWindow(GlowContainer):
         self._worker.start()
 
     def _on_start(self):
+        if not self._can_start():
+            self._show_start_guard_dialog()
+            self._update_start_button()
+            return
         self._start_action("start")
 
     def _on_stop(self):
@@ -832,6 +955,7 @@ class MainWindow(GlowContainer):
         self.control.set_running(running, mode=get_current_mode())
         if self.tray:
             self.tray.set_running(running)
+        self._update_start_button()
 
         if ok and action in ("start", "restart") and running:
             current_mode = get_current_mode()
@@ -1046,6 +1170,7 @@ class MainWindow(GlowContainer):
         self._refresh_current_view()
 
     def _refresh_current_view(self):
+        self._update_start_button()
         try:
             idx = self.stack.currentIndex()
             for key, page_idx in self._pages.items():
@@ -1066,6 +1191,8 @@ class MainWindow(GlowContainer):
         self.activateWindow()
 
     def _process_engine_events(self):
+        # Кнопка Старт серая без целей — обновляем каждый тик (200 мс)
+        self._update_start_button()
         for event in drain_events():
             etype = event.get("type")
             if etype == "status_changed":
@@ -1081,6 +1208,9 @@ class MainWindow(GlowContainer):
                 ui_key = {"dns_only": "blue", "combo": "black", "dpi_only": "red"}.get(mode, "blue")
                 self.mode_switch.set_active(ui_key)
                 self._update_mode_hint()
+                self._update_start_button()
+            elif etype == "config_changed":
+                self._update_start_button()
             elif etype == "auto_doctor_done":
                 msg = event.get("message", "Автодоктор завершён")
                 ok = bool(event.get("ok", False))
@@ -1213,7 +1343,10 @@ class MainWindow(GlowContainer):
     # растянутым снимком выглядела «странно»: мыло/лесенки). Остальные
     # вкладки — на заморозке-снимке со smooth-растяжкой (проверено юзером:
     # «Сеть и диагностика» — супер).
-    LIVE_RESIZE_PAGES = {"routing"}
+    # Телеграмизация 2026-09: все вкладки кроме карты теперь paintEvent-чистые
+    # (RoundedPanel/Canvas) и не фризят при живом resize — freeze-снимок
+    # больше не нужен. Карта исключена по просьбе юзера (сырой виджет).
+    LIVE_RESIZE_PAGES = {"routing", "network", "strategy_lab", "profiles", "log", "settings", "about"}
 
     def _show(self, key: str):
         if key in self._pages:

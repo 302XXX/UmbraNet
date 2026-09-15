@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from umbranet import theme
+from umbranet.widgets.rounded_panel import RoundedPanel
 from umbranet.engine_adapter import (
     DPI_STRATEGY_LIMIT,
     dpi_strategy_delete,
@@ -53,14 +54,17 @@ def _rgba(color: str, alpha: int) -> str:
         return "transparent"
     return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
 
+def _rgba_qc(color: str, alpha: int) -> str:
+    """rgba c alpha 0-1 для theme.qc / RoundedPanel (иначе qc клампит 18→1.0→непрозрачно)."""
+    c = QColor(color)
+    if not c.isValid():
+        return "transparent"
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha/255:.3f})"
 
-def _card(title: str = "") -> tuple[QFrame, QVBoxLayout]:
-    f = QFrame()
-    f.setObjectName("glassCard")
-    f.setStyleSheet(
-        f"QFrame#glassCard{{{theme.card_qss(18)}}}"
-        "QLabel{background:transparent;border:none;}"
-    )
+
+def _card(title: str = "") -> tuple[QWidget, QVBoxLayout]:
+    f = RoundedPanel(theme.CARD, theme.BORDER, radius=16)
+    # QLabel прозрачность — через отдельный стиль
     lay = QVBoxLayout(f)
     lay.setContentsMargins(18, 16, 18, 16)
     lay.setSpacing(12)
@@ -92,12 +96,9 @@ class AiGenerationProgressDialog(QDialog):
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(12)
 
-        card = QFrame()
-        card.setObjectName("progressCard")
-        card.setStyleSheet(
-            f"QFrame#progressCard{{{theme.card_qss(18)}}}"
-            "QLabel{background:transparent;border:none;}"
-        )
+        card = RoundedPanel(theme.CARD, theme.BORDER, radius=18)
+        card.setObjectName("confirmCard")
+        card.setStyleSheet("QLabel{background:transparent;border:none;}")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(18, 16, 18, 16)
         lay.setSpacing(12)
@@ -310,7 +311,7 @@ class StrategyLabView(QWidget):
             f"background:{theme.grad(theme.ACCENT, theme.ACCENT2)};"
             f"color:{theme.WHITE};border-radius:16px;font-size:24px;border:none;"
         )
-        theme.glow(icon, theme.ACCENT, blur=28, dy=8, alpha=110)
+        # glow убран — QGraphicsDropShadowEffect тормозил живой ресайз (-3 мс/кадр)
         head_row.addWidget(icon)
 
         title_box = QVBoxLayout()
@@ -343,6 +344,12 @@ class StrategyLabView(QWidget):
             "ПКМ открывает меню. Внешний вид теперь не похож на скучную папку — это библиотека профилей."
         )
         desc.setWordWrap(True)
+        desc.setFixedHeight(36)
+        try:
+            from PySide6.QtWidgets import QSizePolicy as _SP
+            desc.setSizePolicy(_SP.Preferred, _SP.Fixed)
+        except Exception:
+            pass
         desc.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;line-height:145%;background:transparent;border:none;")
         il.addWidget(desc)
 
@@ -368,14 +375,9 @@ class StrategyLabView(QWidget):
 
         # ── Современная библиотека стратегий ─────────────────────────────────
         list_card, ll = _card("")
+        # Библиотека уже в RoundedPanel (через _card), градиент QSS убран для живого ресайза
         list_card.setObjectName("libraryCard")
-        list_card.setStyleSheet(
-            f"QFrame#libraryCard{{"
-            f"background:{theme.grad(_rgba(theme.ACCENT, 24), theme.CARD_DARK, horizontal=False)};"
-            f"border:1px solid {theme.BORDER};border-radius:18px;"
-            "}"
-            "QLabel{background:transparent;border:none;}"
-        )
+        list_card.setStyleSheet("QLabel{background:transparent;border:none;}")
 
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
@@ -414,6 +416,10 @@ class StrategyLabView(QWidget):
             + theme.scrollbar_qss()
         )
         self._list_holder = QWidget()
+        try:
+            self._list_holder.setAttribute(Qt.WA_StaticContents, True)
+        except Exception:
+            pass
         self._list_holder.setStyleSheet("background:transparent;border:none;")
         self._list = QVBoxLayout(self._list_holder)
         self._list.setContentsMargins(0, 8, 2, 0)
@@ -425,15 +431,13 @@ class StrategyLabView(QWidget):
         self.refresh()
 
     # ── Виджеты / стили ──────────────────────────────────────────────────────
-    def _metric(self, label: str, value: str, color: str) -> QFrame:
-        box = QFrame()
+    def _metric(self, label: str, value: str, color: str) -> QWidget:
+        # RoundedPanel вместо QSS — без маски скругления на каждый кадр
+        # _rgba даёт int 0-255 для QSS, а qc нужен 0-1 → используем _rgba_qc
+        box = RoundedPanel(_rgba_qc(color, 18), _rgba_qc(color, 62), radius=14)
         box.setObjectName("metric")
         box.setMinimumWidth(96)
-        box.setStyleSheet(
-            f"QFrame#metric{{background:{_rgba(color, 18)};border:1px solid {_rgba(color, 62)};"
-            "border-radius:14px;}}"
-            "QLabel{background:transparent;border:none;}"
-        )
+        box.setStyleSheet("QLabel{background:transparent;border:none;}")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(10, 7, 10, 7)
         lay.setSpacing(1)
@@ -463,7 +467,7 @@ class StrategyLabView(QWidget):
             f"QPushButton:hover{{background:{theme.grad(c2, c1)};}}"
             f"QPushButton:disabled{{background:{theme.CARD};color:{theme.MUTED};border:1px solid {theme.BORDER};}}"
         )
-        theme.glow(b, c1, blur=18, dy=5, alpha=70)
+        # glow убран для живого ресайза
         b.clicked.connect(slot)
         return b
 
@@ -657,14 +661,14 @@ class StrategyLabView(QWidget):
 
             if flashed:
                 border = _rgba(theme.ACCENT3, 225)
-                bg = theme.grad(_rgba(theme.ACCENT3, 42), _rgba(theme.ACCENT, 26), horizontal=True)
+                bg = _rgba(theme.ACCENT3, 28)
             elif selected:
                 border = _rgba(theme.ACCENT, 150)
-                bg = theme.grad(_rgba(theme.ACCENT, 34), _rgba(theme.ACCENT2, 16), horizontal=True)
+                bg = _rgba(theme.ACCENT, 22)
             else:
                 border = _rgba(theme.GREEN, 105) if active else theme.BORDER
                 bg = _rgba(theme.WHITE, 8)
-            hover_bg = theme.grad(_rgba(theme.ACCENT, 28), _rgba(theme.ACCENT2, 12), horizontal=True)
+            hover_bg = _rgba(theme.ACCENT, 18)
             row.setStyleSheet(
                 f"QFrame#strategyRow{{background:{bg};border:1px solid {border};border-radius:12px;}}"
                 f"QFrame#strategyRow:hover{{background:{hover_bg};border-color:{_rgba(theme.ACCENT, 155)};}}"
@@ -686,8 +690,8 @@ class StrategyLabView(QWidget):
                 rail_color = theme.ACCENT3 if flashed else (theme.ACCENT if selected else (theme.GREEN if active else "transparent"))
                 rail.setStyleSheet(f"background:{rail_color};border-radius:2px;")
             if badge:
-                badge_bg = theme.grad(theme.GREEN, theme.ACCENT3) if active else (
-                    theme.grad(theme.ACCENT, theme.ACCENT2) if args_count else theme.grad(theme.YELLOW, theme.ORANGE)
+                badge_bg = theme.GREEN if active else (
+                    theme.ACCENT if args_count else theme.YELLOW
                 )
                 badge.setStyleSheet(
                     f"background:{badge_bg};color:#090913;border-radius:14px;"
@@ -954,12 +958,9 @@ class StrategyLabView(QWidget):
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(14)
 
-        card = QFrame()
+        card = RoundedPanel(theme.CARD, theme.BORDER, radius=18)
         card.setObjectName("confirmCard")
-        card.setStyleSheet(
-            f"QFrame#confirmCard{{{theme.card_qss(18)}}}"
-            "QLabel{background:transparent;border:none;}"
-        )
+        card.setStyleSheet("QLabel{background:transparent;border:none;}")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(18, 16, 18, 16)
         lay.setSpacing(12)

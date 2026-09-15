@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from umbranet import theme
+from umbranet.widgets.rounded_panel import RoundedPanel
 
 
 class _Header(QWidget):
@@ -40,15 +41,14 @@ class _Header(QWidget):
         super().mousePressEvent(event)
 
 
-class Collapsible(QFrame):
+class Collapsible(RoundedPanel):
     toggled = Signal(bool)
 
     def __init__(self, title: str, icon: str = "", expanded: bool = False,
                  icon_grad: tuple[str, str] | None = None,
                  right_widget: QWidget | None = None):
-        super().__init__()
+        super().__init__(theme.CARD, theme.BORDER, radius=16)
         self._expanded = expanded
-        self.setStyleSheet(f"Collapsible{{{theme.card_qss()}}}")
         # книжка не должна растягиваться по вертикали сверх своего содержимого —
         # иначе при анимации лишнее место распределяется и заголовок «плавает».
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)

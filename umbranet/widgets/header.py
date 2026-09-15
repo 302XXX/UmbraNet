@@ -208,6 +208,7 @@ class ControlBar(QFrame):
     def __init__(self, running: bool = False, mode: str = "dns_only"):
         super().__init__()
         self._running = running
+        self._can_start = True  # C1: Старт заблокирован без целей
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -265,6 +266,26 @@ class ControlBar(QFrame):
 
     # ── публичные методы ──────────────────────────────────────────────────────
 
+    def set_can_start(self, can: bool):
+        """Делает кнопку Старт серой если нет выбранных сервисов."""
+        self._can_start = bool(can)
+        if not getattr(self, "_running", False):
+            # Только когда остановлен — Старт может быть серым
+            if not self._can_start:
+                self.btn_power.setEnabled(False)
+                self.btn_power.setToolTip("Выберите хотя бы один сервис в «Маршрутизация» → включите тумблер или добавьте домен")
+                self._dot.setStyleSheet(f"color:{theme.YELLOW}; font-size:14px;")
+                self._status.setText("Выберите сервис в «Маршрутизация»")
+                self._status.setStyleSheet(f"color:{theme.YELLOW}; font-size:13px;")
+            else:
+                self.btn_power.setEnabled(True)
+                self.btn_power.setToolTip("")
+                # Вернём нейтральный статус если был жёлтый из-за пустого списка
+                if self._status.text() == "Выберите сервис в «Маршрутизация»":
+                    self._dot.setStyleSheet(f"color:{theme.MUTED}; font-size:14px;")
+                    self._status.setText("Остановлен")
+                    self._status.setStyleSheet(f"color:{theme.SUBTEXT}; font-size:13px;")
+
     def set_running(self, running: bool, mode: str = "dns_only", admin_warn: bool = False):
         self._running = running
         # Убираем любой graphics-эффект — glow не совместим с border-radius QSS
@@ -296,10 +317,18 @@ class ControlBar(QFrame):
             ))
             self.btn_restart.setEnabled(True)
             self.btn_power.setEnabled(True)
+            self.btn_power.setToolTip("")
         else:
             self._dot.setStyleSheet(f"color:{theme.MUTED}; font-size:14px;")
-            self._status.setText("Остановлен")
-            self._status.setStyleSheet(f"color:{theme.SUBTEXT}; font-size:13px;")
+            # Если старт запрещён — статус жёлтый, иначе обычный
+            can = getattr(self, "_can_start", True)
+            if not can:
+                self._dot.setStyleSheet(f"color:{theme.YELLOW}; font-size:14px;")
+                self._status.setText("Выберите сервис в «Маршрутизация»")
+                self._status.setStyleSheet(f"color:{theme.YELLOW}; font-size:13px;")
+            else:
+                self._status.setText("Остановлен")
+                self._status.setStyleSheet(f"color:{theme.SUBTEXT}; font-size:13px;")
             self.btn_power.setText("▶  Старт")
             self.btn_power.setStyleSheet(_power_qss(
                 bg1=theme.GREEN,    bg2="#10b981",
@@ -307,7 +336,11 @@ class ControlBar(QFrame):
                 pressed1="#1e8a55", pressed2="#0e7a45",
             ))
             self.btn_restart.setEnabled(False)
-            self.btn_power.setEnabled(True)
+            self.btn_power.setEnabled(bool(can))
+            if not can:
+                self.btn_power.setToolTip("Выберите хотя бы один сервис в «Маршрутизация» → включите тумблер или добавьте домен")
+            else:
+                self.btn_power.setToolTip("")
 
     def set_busy(self, action: str):
         """Промежуточный статус пока идёт start/stop/restart."""

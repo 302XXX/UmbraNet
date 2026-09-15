@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from umbranet import theme
+from umbranet.widgets.rounded_panel import RoundedPanel
 from umbranet.engine_adapter import (
     get_all_dns_profiles,
     get_engine,
@@ -132,8 +133,7 @@ class ProfilesView(QWidget):
         lay.addWidget(self._btn_ping_all)
 
         # встроенные
-        b_card = QFrame()
-        b_card.setStyleSheet(f"QFrame{{{theme.card_qss()}}}")
+        b_card = RoundedPanel(theme.CARD, theme.BORDER, radius=12)
         bcl = QVBoxLayout(b_card)
         bcl.setContentsMargins(12, 10, 12, 10)
         bcl.setSpacing(6)
@@ -146,8 +146,7 @@ class ProfilesView(QWidget):
         lay.addWidget(b_card)
 
         # пользовательские
-        u_card = QFrame()
-        u_card.setStyleSheet(f"QFrame{{{theme.card_qss()}}}")
+        u_card = RoundedPanel(theme.CARD, theme.BORDER, radius=12)
         ucl = QVBoxLayout(u_card)
         ucl.setContentsMargins(12, 10, 12, 10)
         ucl.setSpacing(6)
@@ -188,8 +187,7 @@ class ProfilesView(QWidget):
 
     # ════════════════ редактор ════════════════
     def _build_editor(self) -> QWidget:
-        panel = QFrame()
-        panel.setStyleSheet(f"QFrame{{{theme.card_qss(18)}}}")
+        panel = RoundedPanel(theme.CARD, theme.BORDER, radius=16)
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(20, 18, 20, 18)
         outer.setSpacing(14)
