@@ -1,0 +1,23 @@
+{
+  "label": "Cyberpunk 2077",
+  "BG": "#0a0a12",
+  "SIDEBAR": "rgba(24, 10, 35, 0.80)",
+  "CARD": "rgba(35, 15, 50, 0.70)",
+  "CARD_TOP": "rgba(50, 20, 75, 0.45)",
+  "CARD_DARK": "rgba(15, 5, 25, 0.60)",
+  "ROW_BG": "rgba(35, 15, 50, 0.60)",
+  "BORDER": "rgba(0, 240, 255, 0.15)",
+  "INPUT_BG": "rgba(15, 5, 25, 0.70)",
+  "ACCENT": "#ff007f",
+  "ACCENT2": "#00f0ff",
+  "ACCENT3": "#ffee00",
+  "GREEN": "#00ff66",
+  "RED": "#ff0055",
+  "YELLOW": "#ffcc00",
+  "ORANGE": "#ff9900",
+  "PINK": "#ff00aa",
+  "TEXT": "#00f0ff",
+  "SUBTEXT": "#ff007f",
+  "MUTED": "#604080",
+  "WHITE": "#ffffff"
+}

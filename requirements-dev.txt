@@ -1,0 +1,12 @@
+# UmbraNet — зависимости для разработки и CI
+# Установка:  pip install -r requirements.txt -r requirements-dev.txt
+#
+# Здесь только то, что нужно тестам и проверке кода: сама программа обходится
+# requirements.txt (PySide6, dnslib, requests, psutil, aioquic, pynacl).
+
+# Тесты
+pytest>=8.0
+
+# Линтер. Версия зафиксирована: набор правил и поведение линтера меняются от
+# версии к версии, а в CI проверка должна быть повторяемой.
+ruff==0.16.7

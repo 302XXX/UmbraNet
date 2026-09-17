@@ -1,0 +1,20 @@
+{
+  "nav_order": [
+    "routing",
+    "network",
+    "profiles",
+    "log",
+    "strategy_lab",
+    "settings",
+    "about"
+  ],
+  "window_geometry": {
+    "w": 1400,
+    "h": 900,
+    "x": 0,
+    "y": 23,
+    "maximized": false,
+    "blob": "AdnQywADAAAAAAAAAAAAFwAABXsAAAOeAAAAAgAAABkAAAV5AAADnAAAAAAAAAAAAyAAAAACAAAAGQAABXkAAAOc"
+  },
+  "state_version": 1
+}
