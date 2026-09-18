@@ -79,10 +79,13 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONUNBUFFERED: "1"
         run: |
-          set -o pipefail
-          python -m pytest tests -q -rf --tb=short 2>&1 | tee pytest_output.txt
-          code=${PIPESTATUS[0]}
+          # RUNNER запускает bash с -e (errexit), поэтому «python ... || code=$?»
+          # — иначе при любом ненулевом коде сценарий умрёт до записи отчёта.
+          python -m pytest tests -q -rf --tb=short > pytest_output.txt 2>&1 || code=$?
+          code=${code:-0}
+          cat pytest_output.txt
           if [ "$code" -ne 0 ]; then
+            # Хвост лога в сводку шага (вкладка Summary).
             {
               echo "## ❌ Тесты упали (код $code)"
               echo ""
@@ -90,6 +93,14 @@ jobs:
               tail -n 150 pytest_output.txt
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # Плюс аннотации в Checks: без логов видно, какие тесты упали
+            # и последние строки перед падением.
+            grep -E "^(FAILED|ERROR)" pytest_output.txt | head -n 10 | while IFS= read -r line; do
+              echo "::error file=tests::${line}"
+            done
+            tail -n 20 pytest_output.txt | while IFS= read -r line; do
+              echo "::error file=.github/workflows/ci.yml::${line}"
+            done
           fi
           exit "$code"
 
