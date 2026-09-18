@@ -113,11 +113,34 @@ def _bad_qss_literals(path: pathlib.Path) -> list[str]:
     return bad
 
 
+# Каталоги, которые не являются кодом UmbraNet: служебные папки, виртуальные
+# окружения (любого имени — pyvenv.cfg внутри), site-packages с чужими
+# библиотеками. Без этого фильтра прогон из venv внутри репозитория
+# «находил бы» чужие файлы (rich, pygments) и падал по ложному срабатыванию.
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tox", ".nox", ".mypy_cache",
+              ".pytest_cache", "build", "dist", "out", "target"}
+
+
+def _is_ours(path: pathlib.Path) -> bool:
+    parts = set(path.parts)
+    if parts & _SKIP_DIRS:
+        return False
+    if "site-packages" in parts:
+        return False
+    # виртуальное окружение любого имени: pyvenv.cfg где-то выше файла
+    for parent in path.parents:
+        if (parent / "pyvenv.cfg").exists():
+            return False
+        if parent == ROOT:
+            break
+    return True
+
+
 def test_no_broken_qss_escaping_anywhere():
     """Ни один QSS-литерал не должен содержать лишних фигурных скобок."""
     problems = []
     for p in sorted(ROOT.rglob("*.py")):
-        if ".git" in p.parts or "__pycache__" in p.parts or ".venv" in p.parts:
+        if not _is_ours(p):
             continue
         problems.extend(_bad_qss_literals(p))
     assert not problems, (

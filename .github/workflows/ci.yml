@@ -69,13 +69,33 @@ jobs:
       - name: Тесты
         # offscreen: у виртуальных машин GitHub нет дисплея, а тесты интерфейса
         # поднимают настоящее окно Qt.
+        #
+        # Выход pytest пишем в файл и продублируем в лог: если процесс умер
+        # не «красиво» (сегфолт — exit 139), файл сохранит то, что успело
+        # напечататься, а хвост улетит в сводку шага (вкладка Summary) —
+        # падение читается без ползания по логам.
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUNBUFFERED: "1"
-        run: python -m pytest tests -q
+        run: |
+          set -o pipefail
+          python -m pytest tests -q -rf --tb=short 2>&1 | tee pytest_output.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            {
+              echo "## ❌ Тесты упали (код $code)"
+              echo ""
+              echo '```'
+              tail -n 150 pytest_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
 
       - name: Диагностика при падении
         if: failure()
+        shell: bash
         run: |
           echo "--- версия Python ---"
           python --version
@@ -83,3 +103,13 @@ jobs:
           python -m pip list
           echo "--- найденные файлы состояния ---"
           python -c "import glob; print(glob.glob('umbranet_ui.json') + glob.glob('*.log'))"
+          # Хвост лога тестов в сводку шага — чтобы падение читалось на вкладке Summary.
+          if [ -f pytest_output.txt ]; then
+            {
+              echo ""
+              echo "## Хвост лога тестов"
+              echo '```'
+              tail -n 200 pytest_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

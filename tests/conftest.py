@@ -72,6 +72,52 @@ def _isolated_config_session(tmp_path_factory):
     os.environ.pop("UMBRANET_CONFIG", None)
 
 
+# ── Пин-фикстура Qt: экраны и приложение живы весь прогон ───────────────────
+#
+# Почему это нужно (найдено при отладке падения CI, сентябрь 2026):
+# тесты создают и закрывают MainWindow по несколько штук за прогон. Каждое
+# окно при построении обращается к экрану (`self.screen()`, `primaryScreen()`),
+# и PySide6-обёртка QScreen «прилипает» к C++-части зомби-окна (через
+# сигнальные соединения/оконные структуры). Вместе с циклом ссылок это делает
+# обёртку видимой только циклическому GC: когда сборщик проходит цикл (триггер
+# — любое выделение памяти, включая внутренние импорты), обёртка dealloc'ится,
+# и Shiboken при этом УНИЧТОЖАЕТ C++ QScreen — единственный экран offscreen-
+# платформы. Дальше список экранов приложения висит в воздухе, и следующее
+# создание виджета (QWidget → QFont → QWidget::screen → QGuiApplication::
+# screenAt) сегфолит либо уходит в вечный цикл. На CI это выглядело как
+# «Тесты: exit code 139» на Linux.
+#
+# Лечится сильным захватом (пином) обёрток: пока кто-то держит их, ни один GC
+# не dealloc'ит их и не сможет удалить C++-экран. Экран и так живёт всю жизнь
+# приложения — пин не меняет поведения, только убирает неопределённость.
+_PINS: list = []
+
+
+def _pin_qt_objects() -> None:
+    try:
+        from PySide6.QtGui import QGuiApplication
+    except Exception:                                    # noqa: BLE001 — PySide6 может не быть
+        return
+    app = QGuiApplication.instance()
+    if app is None:
+        return
+    if app not in _PINS:
+        _PINS.append(app)
+    try:
+        for screen in QGuiApplication.screens():
+            if screen not in _PINS:
+                _PINS.append(screen)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _pin_qt_screens():
+    """Держим QApplication и QScreen в живых, чтобы GC не удалял C++-экраны."""
+    _pin_qt_objects()
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _isolated_ui_state(tmp_path_factory, monkeypatch):
     """Тесты не должны трогать рабочий umbranet_ui.json проекта.
