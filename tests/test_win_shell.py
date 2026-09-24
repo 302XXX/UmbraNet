@@ -600,7 +600,14 @@ def test_tracker_launches_when_powershell_available(fake):
 
 # ── 9. декодирование вывода консоли ─────────────────────────────────────────
 
-def test_decode_console_handles_cp866():
+def test_decode_console_handles_cp866(monkeypatch):
+    # Кодовая страница консоли раннера зависит от локали ОС: на русской
+    # Windows это cp866, на английской (контрагентские CI) — cp437, а cp437
+    # «декодит» любые байты без ошибки — cp866-ветка не успевала сработать.
+    # Тест про саму поддержку cp866, поэтому страницу фиксируем как в
+    # не-Windows-режиме (utf-8 — он не декодирует cp866-байты и пропускает их
+    # к cp866).
+    monkeypatch.setattr(win_shell, "OEM_CODEPAGE", "utf-8")
     text = "Ошибка: не удалось найти параметр"
     assert win_shell.decode_console(text.encode("cp866")) == text
 

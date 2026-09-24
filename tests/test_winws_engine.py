@@ -309,6 +309,11 @@ def test_stop_escalates_via_pid_when_terminate_fails(tmp_path, monkeypatch):
 
     # Имитируем ситуацию «процесс не отдал управление»: terminate/kill не сработали.
     monkeypatch.setattr(eng, "_terminate", lambda proc: False)
+    # Нативное TerminateProcess в тесте не используем: на Windows оно реально
+    # убивает процесс, и PowerShell-ветка эскалации (то, что проверяем) не
+    # выполняется. На Linux нативного убийства и так нет.
+    import winws_engine as mod
+    monkeypatch.setattr(mod, "_kill_pid_native", lambda pid: False)
 
     result = eng.stop()
 

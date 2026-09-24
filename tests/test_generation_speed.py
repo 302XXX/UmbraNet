@@ -93,7 +93,11 @@ def test_discord_checks_run_in_parallel_and_keep_order(monkeypatch):
     result = probes.probe_discord_basic(timeout=1.0)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 1.0, f"проверки Discord шли последовательно: {elapsed:.2f}с"
+    # Порог 2.0 с, а не 1.0: последовательный прогон — 6 × 0.4 = 2.4 с, а
+    # параллельный на медленном CI-раннере (общая ВМ, холодные потоки)
+    # занимает до ~1.1 с. 2.0 отделяет «параллельно» от «последовательно»
+    # с запасом по обе стороны.
+    assert elapsed < 2.0, f"проверки Discord шли последовательно: {elapsed:.2f}с"
     assert result["checks"][1]["host"] == "discord.com", "voice/regions не на своём месте"
     assert result["checks"][5]["host"] == "gateway.discord.gg", "gateway WS не на своём месте"
     assert result["required"] == {"gateway_ws": True, "voice_regions": True}
