@@ -562,6 +562,13 @@ class ControlBar(QFrame):
         """
         t = 0.0 if t <= 0 else (1.0 if t >= 1 else float(t))
         if abs(t - self._power_t) < 0.004:
+            # Ужатая кнопка ОБЯЗАНА иметь подсказку: промежуточный рендер при
+            # t=0 мог снять её, а состояние уже успело «осесть» на том же t
+            # (например, после прохода раскладки) — иначе пользователь видит
+            # ужатый значок без объяснения, что это.
+            if t > 0.0 and not self.btn_power.toolTip():
+                self._render_power()
+                return True
             return False
         self._power_t = t
         self._render_power()

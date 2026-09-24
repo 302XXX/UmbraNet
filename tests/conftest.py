@@ -72,6 +72,113 @@ def _isolated_config_session(tmp_path_factory):
     os.environ.pop("UMBRANET_CONFIG", None)
 
 
+# ── Qt-среда для тестов: детерминированный шрифт + защита от сегфолта ───────
+#
+# Всё выполняется в pytest_configure — ДО импорта тестовых модулей: они
+# создают QApplication ещё на уровне модуля
+# (`APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])`),
+# а фикстуры к этому моменту ещё не запускаются.
+#
+# 1) Шрифт.
+# Тесты интерфейса меряют пиксели: ширина вкладок, переносы текста, появление
+# прокрутки. Метрики зависят от шрифта, а по умолчанию Qt берёт системный:
+# на Linux это «Sans Serif» (DejaVu Sans), на Windows — Segoe UI. Метрики
+# разные, и одни и те же тесты дают разный результат на разных ОС (на Windows
+# тексты и эмодзи шире → вкладка «не влезала» в узкое окно).
+#
+# Поэтому шрифт приложения фиксируем на «UmbraNetTestSans» 9 pt — это DejaVu
+# Sans 2.37 из репозитория (tests/assets), переименованный в своё семейство,
+# чтобы не зависеть от того, что установлено в системе. Эмодзи в нём замаплены
+# на .notdef-глиф: их ширина одинакова на всех ОС и совпадает с тем, что даёт
+# Linux-раннер (там нет эмодзи-шрифта, и Qt рисует тот же .notdef). Без этого
+# на Windows Qt подставлял бы Segoe UI Emoji — и эмодзи оказывались на
+# несколько пикселей шире. Размер 9 pt — стандартный дефолт Qt (тот же, что и
+# сейчас на Linux-раннерах, где тесты зелёные).
+#
+# 2) Сегфолт (exit 139) в середине прогона.
+# Тесты создают и закрывают MainWindow по несколько штук за прогон. Обёртки
+# QScreen «прилипают» к зомби-окнам и образуют циклы ссылок, видимые только
+# циклическому GC. Когда GC собирает такой цикл, освобождается обёртка экрана,
+# и Shiboken уничтожает C++ QScreen — единственный экран offscreen-платформы.
+# Список экранов приложения остаётся висящим, и следующее создание виджета
+# (QWidget → QFont → QWidget::screen → QGuiApplication::screenAt) сегфолит.
+# Место падения разное каждый раз (в win_shell, в network, в dialog) — потому
+# что падает не «тот» тест, а первый виджет, созданный после.
+#
+# Лечится связкой (до — 139 на CI, после — стабильно зелёный прогон):
+#  • пин: сильные ссылки на QApplication и обёртки экранов живы весь прогон
+#    (фикстура _pin_qt_screens ниже) — обёртки не dealloc'ятся;
+#  • gc.disable(): циклический сборщик больше не проходит циклы зомби-окон,
+#    поэтому не освобождает и те обёртки, что пин не успел увидеть (они
+#    создаются в течение теста, между фикстурами). Память при этом не растёт
+#    (замер: ~400 MB на весь прогон), и ни один тест не зависит от
+#    циклического GC (weakref/gc в тестах не используются).
+_TEST_FONT_FAMILY = "UmbraNetTestSans"
+
+_PINS: list = []
+
+
+def _pin_qt_objects() -> None:
+    try:
+        from PySide6.QtGui import QGuiApplication
+    except Exception:                                    # noqa: BLE001 — PySide6 может не быть
+        return
+    app = QGuiApplication.instance()
+    if app is None:
+        return
+    if app not in _PINS:
+        _PINS.append(app)
+    try:
+        for screen in QGuiApplication.screens():
+            if screen not in _PINS:
+                _PINS.append(screen)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def _prepare_qt_environment() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import gc
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QFont, QFontDatabase
+    except Exception:                                    # noqa: BLE001 — нет PySide6
+        return
+    # QApplication нужен ещё до доступа к QFontDatabase (без него Qt ругается:
+    # «Must construct a QGuiApplication before accessing QFontDatabase»).
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    # 1) фиксированный шрифт (см. комментарий выше)
+    for name in ("umbra_test_sans.ttf", "umbra_test_sans_bold.ttf"):
+        ttf = os.path.join(os.path.dirname(__file__), "assets", name)
+        if os.path.exists(ttf):
+            try:
+                QFontDatabase.addApplicationFont(ttf)
+            except Exception:                            # noqa: BLE001
+                pass
+    if _TEST_FONT_FAMILY in QFontDatabase.families():
+        current = app.font()
+        if current.family() != _TEST_FONT_FAMILY or abs(current.pointSizeF() - 9.0) > 0.01:
+            font = QFont(_TEST_FONT_FAMILY)
+            font.setPointSizeF(9.0)
+            app.setFont(font)
+    # 2) защита от сегфолта: пин + выключение циклического GC
+    _pin_qt_objects()
+    gc.disable()
+
+
+def pytest_configure(config):
+    _prepare_qt_environment()
+
+
+@pytest.fixture(autouse=True)
+def _pin_qt_screens():
+    """Держим QApplication и QScreen в живых, чтобы GC не удалял C++-экраны."""
+    _pin_qt_objects()
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _isolated_ui_state(tmp_path_factory, monkeypatch):
     """Тесты не должны трогать рабочий umbranet_ui.json проекта.

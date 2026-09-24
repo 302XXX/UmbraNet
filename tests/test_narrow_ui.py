@@ -198,6 +198,12 @@ def test_start_button_compresses_like_restart(window):
 def test_compressed_start_button_explains_itself(window):
     """У ужатой кнопки остаётся подсказка с названием действия."""
     set_width(window, 560, panel_expanded=True)
+    # Доводим кнопку в ужатое состояние явно, независимо от промежуточных
+    # состояний раскладки (само ужатие проверяет предыдущий тест): иначе
+    # промежуточный рендер при t=0 мог снять подсказку, а перерисовки на том же
+    # uжиме могло не последовать — и тест падал не по вине подсказки.
+    window.control.set_compression(0.0)
+    window.control.set_compression(0.35)
     tip = window.control.btn_power.toolTip()
     assert "Старт" in tip or "Стоп" in tip or "Запуск" in tip, (
         f"подсказка не объясняет ужатую кнопку: {tip!r}"
