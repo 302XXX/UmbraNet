@@ -57,3 +57,28 @@ def test_manual_check_and_prerelease_opt_in(view):
     widget._prereleases.setChecked(True)
     assert checker.include_prereleases
     assert checker.check_async.call_count == 2
+
+
+def test_release_button_gets_layout_geometry_after_hidden_resize(view):
+    """A hidden button may have stale geometry; showing it must relayout it."""
+    from PySide6.QtWidgets import QScrollArea
+
+    widget, checker = view
+    widget.show()
+    for width in (900, 434, 574, 434):
+        checker._result = UpdateResult("current", message="Новых версий нет")
+        widget._refresh_update_status()
+        widget.resize(width, 600)
+        APP.processEvents()
+        assert widget._open_release.isHidden()
+        checker._result = UpdateResult("available", "0.4.0",
+            "https://github.com/302XXX/UmbraNet/releases/tag/v0.4.0", "Доступна версия 0.4.0")
+        widget._refresh_update_status()
+        for _ in range(4):
+            APP.processEvents()
+        body = widget.findChild(QScrollArea).widget()
+        button = widget._open_release
+        assert button.isVisibleTo(body)
+        left = button.mapTo(body, button.rect().topLeft()).x()
+        assert left >= 0
+        assert left + button.width() <= body.width()
