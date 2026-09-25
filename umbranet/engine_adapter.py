@@ -2288,6 +2288,7 @@ def health_score() -> dict:
 def full_diagnostics_report() -> str:
     """Полный текстовый отчёт UmbraNet для копирования."""
     import datetime
+    from umbranet import __version__
     eng = get_engine()
     cfg = getattr(eng, "config", {}) or {}
     hs = health_score()
@@ -2295,6 +2296,7 @@ def full_diagnostics_report() -> str:
     lines = [
         "UmbraNet Full Diagnostic Report",
         "=" * 52,
+        f"version: {__version__}",
         f"time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"health: {hs.get('score')}/100 — {hs.get('title')}",
         f"real_engine: {is_real_engine()}",

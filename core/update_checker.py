@@ -10,8 +10,9 @@ import urllib.request
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from packaging.version import InvalidVersion, Version
+from packaging.version import InvalidVersion
 
+from core.app_version import parse_app_version
 from core.diagnostics import log_recoverable
 
 log = logging.getLogger("UmbraNet.UpdateChecker")
@@ -33,7 +34,7 @@ class UpdateResult:
 def select_release(releases: list, current_version: str,
                    include_prereleases: bool = False) -> UpdateResult:
     """Pick by version, not GitHub order; reject drafts and invalid tags."""
-    current = Version(current_version)
+    current = parse_app_version(current_version).value
     candidates = []
     for release in releases:
         if not isinstance(release, dict) or release.get("draft", False):
@@ -42,7 +43,8 @@ def select_release(releases: list, current_version: str,
         if not isinstance(tag, str) or len(tag) > 100:
             continue
         try:
-            version = Version(tag)
+            parsed = parse_app_version(tag)
+            version = parsed.value
         except InvalidVersion:
             continue
         if not include_prereleases and (
@@ -52,16 +54,16 @@ def select_release(releases: list, current_version: str,
         # Local builds are not a public release channel.
         if version.local is not None:
             continue
-        candidates.append((version, tag))
+        candidates.append((version, tag, parsed.display))
     if not candidates:
         return UpdateResult("no_releases", message="В выбранном канале пока нет релизов.")
-    version, tag = max(candidates)
+    version, tag, display = max(candidates)
     if version <= current:
         return UpdateResult("current", message="Новых версий в выбранном канале нет.")
     # Do not trust html_url from remote JSON. Open only this repository on HTTPS.
     url = RELEASES_PAGE + "/tag/" + quote(tag, safe="")
-    return UpdateResult("available", str(version), url,
-                        f"Доступна версия {version}. Установка — вручную со страницы релиза.")
+    return UpdateResult("available", display, url,
+                        f"Доступна версия {display}. Установка — вручную со страницы релиза.")
 
 
 def fetch_releases(include_prereleases: bool) -> list:
@@ -98,7 +100,7 @@ class UpdateChecker:
     changes discard an in-flight result rather than showing a stale prerelease.
     """
     def __init__(self, current_version: str, *, include_prereleases: bool = False):
-        Version(current_version)  # fail early on an invalid build version
+        parse_app_version(current_version)  # validate both short and legacy labels
         self.current_version = current_version
         self._include_prereleases = bool(include_prereleases)
         self._lock = threading.Lock()

@@ -142,3 +142,67 @@ def test_thread_start_failure_is_recoverable(monkeypatch):
     assert not checker.check_async()
     assert not checker.busy
     assert checker.result.state == "error"
+
+
+@pytest.mark.parametrize("current,tag,state", [
+    ("26.0.1a", "v26.0.1b", "available"),
+    ("26.0.1b", "v26.0.1r", "available"),
+    ("26.0.1r", "v26.0.1b", "current"),
+    ("26.0.1b", "v26.0.1a", "current"),
+    ("26.0.1b", "v26.0.1b", "current"),
+    ("26.0.1r", "v26.0.1r", "current"),
+    ("26.0.1", "v26.0.1r", "current"),
+    ("26.0.1r", "v26.0.1", "current"),
+    ("26.0.1b0", "v26.0.1b", "current"),
+    ("26.0.1r", "v26.0.2a", "available"),
+    ("26.0.9r", "v26.0.10b", "available"),
+    ("0.4.0-dev", "v26.0.1b", "available"),
+    ("26.0.1b", "v0.4.0", "current"),
+])
+def test_short_version_ordering(current, tag, state):
+    result = uc.select_release([release(tag)], current, include_prereleases=True)
+    assert result.state == state
+
+
+@pytest.mark.parametrize("tag,prerelease", [
+    ("v26.0.2a", False), ("v26.0.2b", False),
+    ("v26.0.2a", True), ("v26.0.2b", True), ("v26.0.2r", True),
+])
+def test_stable_channel_honors_suffix_and_github_flag(tag, prerelease):
+    assert uc.select_release([release(tag, prerelease=prerelease)], "26.0.1b").state == "no_releases"
+
+
+def test_beta_user_can_receive_stable_release_without_opt_in():
+    result = uc.select_release([release("v26.0.1r")], "26.0.1b")
+    assert result.state == "available"
+    assert result.version == "26.0.1r"
+    assert ".post" not in result.message
+
+
+def test_short_release_selection_and_notification_keep_public_label():
+    releases = [release("v26.0.1r"), release("v26.0.2a", prerelease=True),
+                release("v26.0.2b", prerelease=True, html_url="file:///not-a-release"),
+                release("v99.0.1r", draft=True), release("not-a-version")]
+    result = uc.select_release(releases, "26.0.1b", True)
+    assert result.version == "26.0.2b"
+    assert "26.0.2b0" not in result.message
+    assert "26.0.2b." in result.message
+    assert result.url == uc.RELEASES_PAGE + "/tag/v26.0.2b"
+    assert uc.select_release(releases, "26.0.1b").version == "26.0.1r"
+
+
+@pytest.mark.parametrize("version", ["26.0.1a", "26.0.1b", "26.0.1r", "0.4.0-dev"])
+def test_checker_constructor_accepts_public_and_legacy_versions(version):
+    checker = uc.UpdateChecker(version)
+    assert checker.current_version == version
+
+
+def test_async_checker_handles_stable_r_tag(monkeypatch):
+    from umbranet import __version__
+    monkeypatch.setattr(uc, "threading", SimpleNamespace(Lock=threading.Lock, Thread=InlineThread))
+    monkeypatch.setattr(uc, "fetch_releases", lambda channel: [release("v26.0.1r")])
+    checker = uc.UpdateChecker(__version__)
+    assert checker.check_async()
+    assert not checker.busy
+    assert checker.result.state == "available"
+    assert checker.result.version == "26.0.1r"
