@@ -169,6 +169,23 @@ def test_health_text_grows_with_content(window, net_view):
     assert narrow > wide, f"высота не растёт с сужением: {wide} → {narrow}"
 
 
+
+def test_health_title_wraps_without_widening_page(window, net_view):
+    title = net_view._health_title
+    original = title.text()
+    try:
+        title.setText("Проверка доступности DNS-провайдеров и параметров сетевого подключения")
+        set_width(window, 560)
+        assert title.wordWrap(), "длинный заголовок диагностики должен переноситься"
+        needed = title.heightForWidth(title.width())
+        assert needed > title.fontMetrics().height(), "заголовок должен занять несколько строк"
+        assert title.height() >= needed - 1, "заголовок обрезан по высоте"
+        body = body_of(net_view)
+        assert body.minimumSizeHint().width() <= 400, "заголовок расширил вкладку"
+    finally:
+        title.setText(original)
+        settle()
+
 def test_long_status_grows_card_instead_of_being_cut(window, net_view):
     """Длинный текст в подписи растягивает карточку, а не режется её границей.
 
