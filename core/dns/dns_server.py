@@ -18,11 +18,14 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
 
 import requests
+
+from core.diagnostics import log_recoverable
 from bogus_ips import (
     build_bogus_index_with_cache,
     response_contains_bogus,
@@ -217,8 +220,8 @@ def preflight_check(config: dict) -> tuple:
                 f"нужны права администратора для порта {port} "
                 f"(запустите от имени администратора)"
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось проверить права для DNS-порта', exc, level=logging.WARNING)
 
     # 2) IPv4 порт
     host4 = config.get("listen_host", "127.0.0.1")
@@ -264,8 +267,8 @@ def _query_tcp_dns(server_ip: str, request, timeout: float = 4.0):
     finally:
         try:
             sock.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось закрыть TCP-сокет upstream', exc, level=logging.DEBUG)
 
 
 def _query_udp_dns(server_ip: str, request, timeout: float = 4.0):
@@ -279,8 +282,8 @@ def _query_udp_dns(server_ip: str, request, timeout: float = 4.0):
     finally:
         try:
             sock.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось закрыть UDP-сокет upstream', exc, level=logging.DEBUG)
 
     response = DNSRecord.parse(data)
     if getattr(response.header, "tc", 0):
@@ -306,8 +309,8 @@ def _query_doh_dns(doh_url: str, request, timeout: float = 5.0):
         )
         response.raise_for_status()
         return DNSRecord.parse(response.content)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'DoH POST не удался; пробуем GET', exc, level=logging.DEBUG)
 
     response = requests.post(
         doh_url,
@@ -698,8 +701,8 @@ def _proxy_reply_from_upstream(request, upstream):
         if hasattr(upstream.header, flag) and hasattr(reply.header, flag):
             try:
                 setattr(reply.header, flag, getattr(upstream.header, flag))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось перенести флаг DNS-ответа', exc, level=logging.DEBUG)
 
     for rr in upstream.rr:
         reply.add_answer(rr)
@@ -1058,14 +1061,20 @@ class UmbraNetResolver(BaseResolver):
         try:
             marker_response._umbranet_bogus_nxdomain = True
             marker_response._umbranet_bogus_ip = ip_str2 or ip_str or ""
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось прикрепить метку bogus-IP к DNS-ответу', exc, level=logging.DEBUG)
         return marker_response
 
 
 class UmbraNetDNS:
     def __init__(self):
         self.config = load_config()
+        self._subscriptions_lock = threading.Lock()
+        # Separate the long download lock from short state/commit transitions.
+        # Reload and UI source edits must use the same lock as cache publication.
+        self._subscription_state_lock = threading.RLock()
+        self._subscriptions_generation = 0
+        self._subscription_cache_valid = True
         self._cfg_ref = [self.config]
         self.cache = DNSCache()
         # DPI Engine (Обход блокировок на уровне пакетов)
@@ -1086,6 +1095,8 @@ class UmbraNetDNS:
                 config_dir=_CORE_DIR,
                 on_update=self._on_bogus_update,
             )
+            self.bogus_updater.add_task("подписки", self._update_subscriptions)
+            self.bogus_updater.add_task("доменные списки стратегий", self._update_strategy_domains)
         except Exception as exc:
             log.warning("BogusUpdater недоступен: %s", exc)
             self.bogus_updater = None
@@ -1097,11 +1108,17 @@ class UmbraNetDNS:
         self.running = False
         self._resolver: UmbraNetResolver | None = None  # ссылка для on_update
         self.load_subscribed_domains()
-        if self.config.get("routed_subscriptions"):
-            self.update_subscriptions_async()
 
     def load_subscribed_domains(self) -> None:
-        """Загружает закэшированные домены из подписок во внутренний set."""
+        """Load cache only for an enabled, still-valid subscription source set."""
+        with self._subscription_state_lock:
+            if (not self.config.get("routed_subscriptions") or
+                    not self._subscription_cache_valid):
+                self.config["subscribed_domains_set"] = set()
+                return
+            self._load_subscribed_domains_locked()
+
+    def _load_subscribed_domains_locked(self) -> None:
         path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
         if not os.path.exists(path):
             self.config["subscribed_domains_set"] = set()
@@ -1124,164 +1141,253 @@ class UmbraNetDNS:
             log.warning("Не удалось загрузить кэш подписок: %s", exc)
             self.config["subscribed_domains_set"] = set()
 
-    def update_subscriptions_async(self, on_done=None) -> None:
-        """Запускает фоновое обновление всех подписок из интернета.
+    def _invalidate_subscription_cache_locked(self) -> bool:
+        """Discard an aggregate that may contain domains from removed sources.
 
-        H2 limits:
-          • максимум 10 URL
-          • контент ≤ 5 MB на подписку
-          • ≤50k доменов на подписку, ≤100k суммарно
-          • ≤200k строк на подписку
-          • таймаут 10 сек, User-Agent фиксирован
-          • бэкап предыдущего кэша перед записью
+        Even if unlink fails, this session must not reload the obsolete file.
+        A successful refresh makes the cache valid again.
         """
-        def _worker():
+        self._subscription_cache_valid = False
+        self.config["subscribed_domains_set"] = set()
+        self.cache.clear()
+        path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log_recoverable(log, "Не удалось удалить устаревший кэш подписок", exc,
+                            level=logging.WARNING)
+            return False
+        return True
+
+    def change_subscription(self, url: str, *, remove: bool = False) -> bool:
+        """UI source edit, serialized with reload and final cache publication."""
+        with self._subscription_state_lock:
             urls = list(self.config.get("routed_subscriptions", []) or [])
-            # H2: лимит количества подписок
-            MAX_URLS = 10
-            MAX_CONTENT_BYTES = 5 * 1024 * 1024
-            MAX_PER_SUB = 50_000
-            MAX_TOTAL = 100_000
-            MAX_LINES = 200_000
-            if len(urls) > MAX_URLS:
-                log.warning("Слишком много подписок (%d), берём первые %d", len(urls), MAX_URLS)
-                urls = urls[:MAX_URLS]
-            if not urls:
-                self.config["subscribed_domains_set"] = set()
-                path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-                if on_done:
-                    on_done(True, 0)
-                return
+            if (url in urls) != remove:
+                return False
+            if remove:
+                urls.remove(url)
+            else:
+                urls.append(url)
+            self.config["routed_subscriptions"] = urls
+            self._subscriptions_generation += 1
+            if remove:
+                self._invalidate_subscription_cache_locked()
+            save_config(self.config)
+            return True
 
-            import urllib.request
-            compiled_domains = set()
-            fetch_failed = False
-            successful_fetches = 0
+    def start_background_updates(self) -> None:
+        """Shared startup path for GUI and headless DNS; start is idempotent."""
+        if self.bogus_updater is not None:
+            self.bogus_updater.start()
 
-            for url in urls:
-                log.info("Обновление подписки: %s", url)
-                if len(compiled_domains) >= MAX_TOTAL:
-                    log.warning("Достигнут лимит %d доменов, остальные подписки пропущены", MAX_TOTAL)
-                    break
+    @staticmethod
+    def _update_strategy_domains() -> bool:
+        from core.dpi.domain_updater import update_all_strategies
+        from core.dpi.strategy_manager import get_strategy_manager
+        return update_all_strategies(get_strategy_manager().strategies_dir)
+
+    def _update_subscriptions(self) -> bool:
+        """Synchronous scheduler task; never overlaps a manual download."""
+        if not self._subscriptions_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._fetch_subscriptions()
+        finally:
+            self._subscriptions_lock.release()
+
+    def update_subscriptions_async(self, on_done=None) -> None:
+        """Manual refresh; callback(success, count) runs in the worker thread.
+
+        A second request reports False without starting a duplicate download.
+        """
+        acquired = self._subscriptions_lock.acquire(blocking=False)
+
+        def _worker():
+            ok = False
+            try:
+                if acquired:
+                    ok = self._fetch_subscriptions()
+            except Exception as exc:
+                log_recoverable(log, "Не удалось обновить подписки", exc,
+                                level=logging.WARNING)
+            finally:
+                if acquired:
+                    self._subscriptions_lock.release()
+            if on_done:
                 try:
-                    from urllib.parse import urlsplit
-                    parsed_url = urlsplit(str(url).strip())
-                    if parsed_url.scheme.lower() not in ("http", "https") or not parsed_url.netloc:
-                        log.warning("Пропущен небезопасный URL подписки: %s", url)
+                    on_done(ok, len(self.config.get("subscribed_domains_set", set()) or []))
+                except Exception as exc:
+                    log_recoverable(log, "Не удалось сообщить результат обновления подписок", exc)
+
+        try:
+            threading.Thread(target=_worker, daemon=True, name="UmbraNet-Subscriptions").start()
+        except Exception:
+            if acquired:
+                self._subscriptions_lock.release()
+            raise
+
+    def _fetch_subscriptions(self) -> bool:
+        """Bounded fetch; keep the previous cache if any subscription fails."""
+        with self._subscription_state_lock:
+            config_snapshot = self.config
+            generation = self._subscriptions_generation
+            urls = list(config_snapshot.get("routed_subscriptions", []) or [])
+        original_urls = list(urls)
+        # H2: лимит количества подписок
+        MAX_URLS = 10
+        MAX_CONTENT_BYTES = 5 * 1024 * 1024
+        MAX_PER_SUB = 50_000
+        MAX_TOTAL = 100_000
+        MAX_LINES = 200_000
+        if len(urls) > MAX_URLS:
+            log.warning("Слишком много подписок (%d), берём первые %d", len(urls), MAX_URLS)
+            urls = urls[:MAX_URLS]
+        if not urls:
+            with self._subscription_state_lock:
+                if not self._subscription_snapshot_current(config_snapshot, generation, original_urls):
+                    return False
+                return self._invalidate_subscription_cache_locked()
+
+        import urllib.request
+        compiled_domains = set()
+        fetch_failed = False
+        successful_fetches = 0
+
+        for index, url in enumerate(urls, 1):
+            log.info("Обновление подписки №%d", index)
+            if len(compiled_domains) >= MAX_TOTAL:
+                log.warning("Достигнут лимит %d доменов, остальные подписки пропущены", MAX_TOTAL)
+                break
+            try:
+                from urllib.parse import urlsplit
+                parsed_url = urlsplit(str(url).strip())
+                if parsed_url.scheme.lower() not in ("http", "https") or not parsed_url.netloc:
+                    log.warning("Пропущен небезопасный URL подписки №%d", index)
+                    fetch_failed = True
+                    continue
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "UmbraNet/1.0 Subscription-Updater"}
+                )
+                # H2: таймаут 10s, лимит размера
+                with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 - http(s) allowlist above
+                    # проверяем Content-Length заголовок, если есть
+                    clen = resp.headers.get("Content-Length")
+                    if clen is not None:
+                        try:
+                            if int(clen) > MAX_CONTENT_BYTES:
+                                log.warning("Подписка №%d слишком большая, пропускаем", index)
+                                fetch_failed = True
+                                continue
+                        except Exception as exc:
+                            log_recoverable(log, 'Некорректный Content-Length подписки; проверяем размер тела', exc, level=logging.DEBUG)
+                    raw = resp.read(MAX_CONTENT_BYTES + 1)
+                    if len(raw) > MAX_CONTENT_BYTES:
+                        log.warning("Подписка №%d превышает лимит %d байт, пропускаем", index, MAX_CONTENT_BYTES)
                         fetch_failed = True
                         continue
-                    req = urllib.request.Request(
-                        url, headers={"User-Agent": "UmbraNet/1.0 Subscription-Updater"}
-                    )
-                    # H2: таймаут 10s, лимит размера
-                    with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 - http(s) allowlist above
-                        # проверяем Content-Length заголовок, если есть
-                        clen = resp.headers.get("Content-Length")
-                        if clen is not None:
-                            try:
-                                if int(clen) > MAX_CONTENT_BYTES:
-                                    log.warning("Подписка %s слишком большая (%s байт), пропускаем", url, clen)
-                                    fetch_failed = True
-                                    continue
-                            except Exception:
-                                pass
-                        raw = resp.read(MAX_CONTENT_BYTES + 1)
-                        if len(raw) > MAX_CONTENT_BYTES:
-                            log.warning("Подписка %s превышает лимит %d байт, пропускаем", url, MAX_CONTENT_BYTES)
-                            fetch_failed = True
-                            continue
-                        content = raw.decode("utf-8", errors="ignore")
-                    successful_fetches += 1
+                    content = raw.decode("utf-8", errors="ignore")
+                successful_fetches += 1
 
-                    per_sub_count = 0
-                    for idx, line in enumerate(content.splitlines()):
-                        if idx >= MAX_LINES:
-                            log.warning("Подписка %s: превышен лимит строк %d, обрезаем", url, MAX_LINES)
-                            break
-                        if per_sub_count >= MAX_PER_SUB:
-                            log.warning("Подписка %s: превышен лимит %d доменов, обрезаем", url, MAX_PER_SUB)
-                            break
-                        if len(compiled_domains) >= MAX_TOTAL:
-                            break
-                        # 1) Отрезаем комментарии в конце строки (# или //)
-                        line = line.split("#")[0].split("//")[0].strip()
-                        if not line:
-                            continue
+                per_sub_count = 0
+                valid_for_sub = False
+                for idx, line in enumerate(content.splitlines()):
+                    if idx >= MAX_LINES:
+                        log.warning("Подписка №%d: превышен лимит строк %d, обрезаем", index, MAX_LINES)
+                        break
+                    if per_sub_count >= MAX_PER_SUB:
+                        log.warning("Подписка №%d: превышен лимит %d доменов, обрезаем", index, MAX_PER_SUB)
+                        break
+                    if len(compiled_domains) >= MAX_TOTAL:
+                        break
+                    # Keep http(s):// intact; // comments need whitespace.
+                    line = line.split("#", 1)[0].strip()
+                    if not line or line.startswith("//"):
+                        continue
+                    line = re.split(r"\s+//", line, maxsplit=1)[0].strip()
 
-                        # 2) Парсим hosts-формат (например, "127.0.0.1 domain.com" или "0.0.0.0 domain.com")
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            first = parts[0]
-                            # Если первая часть похожа на IP-адрес (содержит точки/двоеточия, но не буквы)
-                            if any(c in first for c in (".", ":")) and not any(c.isalpha() for c in first):
-                                val = parts[1]
-                            else:
-                                val = parts[0]
-                        elif len(parts) == 1:
-                            val = parts[0]
+                    # 2) Парсим hosts-формат (например, "127.0.0.1 domain.com" или "0.0.0.0 domain.com")
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        first = parts[0]
+                        # Если первая часть похожа на IP-адрес (содержит точки/двоеточия, но не буквы)
+                        if any(c in first for c in (".", ":")) and not any(c.isalpha() for c in first):
+                            val = parts[1]
                         else:
-                            continue
+                            val = parts[0]
+                    elif len(parts) == 1:
+                        val = parts[0]
+                    else:
+                        continue
 
-                        # 3) Очищаем домен от схем и путей
-                        val = val.lower()
-                        for pre in ("https://", "http://", "www."):
-                            val = val.removeprefix(pre)
-                        val = val.split("/")[0].strip()
+                    # 3) Очищаем домен от схем и путей
+                    val = val.lower()
+                    for pre in ("https://", "http://", "www."):
+                        val = val.removeprefix(pre)
+                    val = val.split("/")[0].strip()
 
-                        # 4) Базовая валидация домена
-                        if val and "." in val and not val.endswith("."):
-                            if val not in compiled_domains:
-                                compiled_domains.add(val)
-                                per_sub_count += 1
-                except Exception as exc:
+                    # Reject HTML/error pages rather than replacing a good cache.
+                    try:
+                        val = val.rstrip(".").encode("idna").decode("ascii")
+                    except UnicodeError:
+                        continue
+                    if (len(val) <= 253 and "." in val and
+                            all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                for label in val.split("."))):
+                        valid_for_sub = True
+                        if val not in compiled_domains:
+                            compiled_domains.add(val)
+                            per_sub_count += 1
+                if not valid_for_sub:
                     fetch_failed = True
-                    log.warning("Ошибка при загрузке подписки %s: %s", url, exc)
+                    log.warning("Подписка №%d не содержит допустимых доменов; кэш сохранён", index)
+            except Exception as exc:
+                fetch_failed = True
+                log.warning("Ошибка при загрузке подписки №%d (%s)", index, type(exc).__name__)
 
-            if fetch_failed or successful_fetches != len(urls):
-                # Не затираем последний рабочий cache при кратковременном
-                # падении сети: подписки должны деградировать в offline-режим.
-                current_count = len(self.config.get("subscribed_domains_set", set()) or [])
-                log.warning("Кэш подписок сохранён: обновление не завершилось для всех URL")
-                if on_done:
-                    on_done(False, current_count)
-                return
+        if fetch_failed or successful_fetches != len(urls):
+            # Не затираем последний рабочий cache при кратковременном
+            # падении сети: подписки должны деградировать в offline-режим.
+            log.warning("Кэш подписок сохранён: обновление не завершилось для всех URL")
+            return False
 
-            path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
-            temp_path = f"{path}.{threading.get_ident()}.tmp"
-            try:
-                # бэкап предыдущего кэша
+        path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
+        temp_path = f"{path}.{threading.get_ident()}.tmp"
+        try:
+            # Network and serialization run WITHOUT the state lock: editing
+            # subscriptions/reloading config must not wait for a download.
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(list(compiled_domains), f, ensure_ascii=False, indent=2)
+            with self._subscription_state_lock:
+                if not self._subscription_snapshot_current(config_snapshot, generation, original_urls):
+                    log.info("Подписки изменены во время обновления; результат отброшен")
+                    return False
                 if os.path.exists(path):
                     try:
                         import shutil
                         shutil.copy2(path, f"{path}.bak")
-                    except Exception:
-                        pass
-                # Атомарная замена не оставляет битый JSON, если приложение
-                # завершится во время записи большого списка доменов.
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump(list(compiled_domains), f, ensure_ascii=False, indent=2)
+                    except Exception as exc:
+                        log_recoverable(log, 'Не удалось создать резервную копию кэша подписок', exc,
+                                        level=logging.WARNING)
+                # No reload or UI source edit can interleave these two writes.
                 os.replace(temp_path, path)
                 self.config["subscribed_domains_set"] = compiled_domains
-                log.info("Подписки успешно обновлены. Итого доменов в кэше: %d", len(compiled_domains))
-                if on_done:
-                    on_done(True, len(compiled_domains))
-            except Exception as exc:
-                log.error("Не удалось записать кэш подписок: %s", exc)
-                if on_done:
-                    on_done(False, 0)
-            finally:
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except OSError:
-                    pass
+                self._subscription_cache_valid = True
+                self.cache.clear()
+            log.info("Подписки успешно обновлены. Итого доменов в кэше: %d", len(compiled_domains))
+            return True
+        except Exception as exc:
+            log.error("Не удалось записать кэш подписок: %s", exc)
+            return False
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError as exc:
+                log_recoverable(log, 'Не удалось удалить временный файл подписок', exc, level=logging.DEBUG)
 
-        threading.Thread(target=_worker, daemon=True, name="UmbraNet-Subscriptions").start()
 
     def _on_bogus_update(self, ips: list, subnets: list) -> None:
         """Callback от BogusUpdater: сбрасываем bogus-кэш резолвера."""
@@ -1291,11 +1397,23 @@ class UmbraNetDNS:
             except Exception as exc:
                 log.debug("_on_bogus_update: ошибка сброса кэша: %s", exc)
 
+    def _subscription_snapshot_current(self, config, generation, urls) -> bool:
+        """Caller holds the state lock; generation also detects remove/add ABA."""
+        return (self.config is config and self._subscriptions_generation == generation and
+                list(self.config.get("routed_subscriptions", []) or []) == urls)
+
     def reload_config(self):
-        self.config = load_config()
-        self._cfg_ref[0] = self.config
-        self.load_subscribed_domains()
-        self.cache.clear()
+        with self._subscription_state_lock:
+            config = load_config()
+            self._subscriptions_generation += 1
+            old_sources = set(self.config.get("routed_subscriptions", []) or [])
+            new_sources = set(config.get("routed_subscriptions", []) or [])
+            if not old_sources.issubset(new_sources):
+                self._invalidate_subscription_cache_locked()
+            self.config = config
+            self.load_subscribed_domains()
+            self._cfg_ref[0] = self.config
+            self.cache.clear()
         log.info("Конфигурация перезагружена; DNS-кэш очищен")
 
     def start(self):
@@ -1435,7 +1553,7 @@ class UmbraNetDNS:
             # Запускаем фоновое обновление bogus-IP
             if self.bogus_updater is not None:
                 try:
-                    self.bogus_updater.start()
+                    self.start_background_updates()
                 except Exception as exc:
                     log.debug("Не удалось запустить BogusUpdater: %s", exc)
             mode = self.config.get("xbox_dns_mode", "udp")
@@ -1460,20 +1578,20 @@ class UmbraNetDNS:
             try:
                 if hasattr(self, "winws") and self.winws:
                     self.winws.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось остановить WinWS после неудачного старта DNS', exc, level=logging.ERROR)
             # До создания DNS-сокетов мы уже могли запустить фоновые helper'ы.
             # Не оставляем их жить после неудачного старта: иначе повторный
             # запуск создавал лишние потоки и stale-состояние трекера.
             try:
                 if self.process_tracker is not None:
                     self.process_tracker.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось остановить трекер процессов после неудачного старта DNS', exc, level=logging.WARNING)
             try:
                 self.cache.stop_janitor()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось остановить очистку кэша после неудачного старта DNS', exc, level=logging.WARNING)
             self._resolver = None
             return False
 
@@ -1488,8 +1606,8 @@ class UmbraNetDNS:
                     # Принудительно закрываем сокет, чтобы порт освободился мгновенно
                     if hasattr(server, "server") and server.server is not None:
                         server.server.server_close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_recoverable(log, 'Не удалось закрыть DNS-сервер; порт может остаться занят', exc, level=logging.ERROR)
                 setattr(self, srv_name, None)
         
         if hasattr(self, "winws") and self.winws:
@@ -1499,18 +1617,18 @@ class UmbraNetDNS:
         if self.bogus_updater is not None:
             try:
                 self.bogus_updater.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось остановить фоновые обновления', exc, level=logging.WARNING)
 
         if self.process_tracker is not None:
             try:
                 self.process_tracker.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось остановить трекер DNS-процессов', exc, level=logging.WARNING)
         try:
             self.cache.stop_janitor()
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось остановить очистку DNS-кэша', exc, level=logging.WARNING)
         self.running = False
         self.server4 = None
         self.server4_tcp = None

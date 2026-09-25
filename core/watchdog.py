@@ -119,10 +119,9 @@ class _FdStream:
         self._fd = fd
 
     def read(self, size: int = 4096) -> bytes:
-        try:
-            return os.read(self._fd, size)
-        except OSError:
-            return b""
+        # Only a real zero-byte read is EOF. Let LineReader classify OSError
+        # as a broken/unmonitored pipe, not proof that the parent has died.
+        return os.read(self._fd, size)
 
 
 class UnmonitoredError(RuntimeError):

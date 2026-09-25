@@ -86,3 +86,9 @@ out/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Scheduled list refresh caches (not source data)
+subscribed_domains_cache.json
+subscribed_domains_cache.json.bak
+bogus_ips_cache.json.bak
+strategies/remote_hostlist_*.txt

@@ -494,6 +494,9 @@ class NetworkView(QWidget):
         texts = QVBoxLayout()
         texts.setSpacing(5)
         self._health_title = QLabel("Проверка ещё не запускалась")
+        # Health reports can have long titles. Like their details, they must
+        # wrap instead of imposing a minimum width on the whole network page.
+        self._health_title.setWordWrap(True)
         self._health_title.setStyleSheet(f"color:{theme.TEXT};font-size:16px;font-weight:800;background:transparent;border:none;")
         self._health_text = QLabel("Нажмите одну кнопку — UmbraNet проверит состояние и сам применит безопасную починку, если она нужна.")
         _wrapped(self._health_text, 42)

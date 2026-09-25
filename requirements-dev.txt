@@ -5,7 +5,9 @@
 # requirements.txt (PySide6, dnslib, requests, psutil, aioquic, pynacl).
 
 # Тесты
-pytest>=8.0
+pytest==8.4.2
+# Cross-platform stack dump + hard failure for blocked Qt event loops in CI.
+pytest-timeout==2.4.0
 
 # Линтер. Версия зафиксирована: набор правил и поведение линтера меняются от
 # версии к версии, а в CI проверка должна быть повторяемой.

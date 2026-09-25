@@ -23,6 +23,8 @@ import logging
 import os
 import sys
 
+from core.diagnostics import log_recoverable
+
 log = logging.getLogger("UmbraNet.adapter")
 
 # Признак, что под нами настоящее ядро (а не заглушка)
@@ -92,6 +94,18 @@ class _StubEngine:
 
     def reload_config(self) -> None:
         pass
+
+    def change_subscription(self, url: str, *, remove: bool = False) -> bool:
+        urls = self.config.setdefault("routed_subscriptions", [])
+        if (url in urls) != remove:
+            return False
+        if remove:
+            urls.remove(url)
+        else:
+            urls.append(url)
+        if remove:
+            self.config["subscribed_domains_set"] = set()
+        return True
 
     def add_domain(self, d): self.config["routed_domains"].append(d.strip().lower())
     def remove_domain(self, d):
@@ -186,8 +200,8 @@ def switch_mode(ui_mode: str) -> tuple:
         try:
             if not get_dpi_targets():
                 log.info("switch_mode(%s): hostlist пуст — переключение разрешено, но Старт будет заблокирован", ui_mode)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось проверить DPI-цели при переключении режима', exc, level=logging.DEBUG)
     eng = get_engine()
     try:
         ok, err = eng.switch_mode(ui_mode)
@@ -518,8 +532,8 @@ def _detect_dns_conflict_processes() -> list[str]:
                 label = _KNOWN_DNS_CONFLICTS[name]
                 if label not in found:
                     found.append(label)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось проверить конфликтующие DNS-процессы', exc, level=logging.WARNING)
     return found
 
 
@@ -657,8 +671,8 @@ def get_startup_health() -> dict:
                         "Скачайте релиз zapret (winws) и поместите winws.exe в UmbraNet1/bin/ "
                         "или переключитесь в режим 'Только DNS'."
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось проверить наличие WinWS', exc, level=logging.WARNING)
 
     conflicts = _detect_dns_conflict_processes()
     if conflicts:
@@ -676,8 +690,8 @@ def get_startup_health() -> dict:
                     f"Выбран режим с DPI, но DPI недоступен: {reason_dpi}. "
                     "DNS запустится, но Combo/DPI Only не даст эффекта."
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось завершить проверку доступности DPI', exc, level=logging.WARNING)
 
     def _dedupe(items: list[str]) -> list[str]:
         seen = set()
@@ -805,7 +819,7 @@ def mode_info(ui_mode: str | None = None) -> dict:
             "emoji": "🛡",
             "summary": "Агрессивный DPI-режим",
             "details": "DNS остаётся для резолва и журнала запросов, DPI работает в режиме zapret. Используйте, если DNS Only/Combo не помогает.",
-            "warning": "" if dpi_ok else f"DPI сейчас недоступен: {dpi_reason}. Нужны pydivert и WinDivert driver.",
+            "warning": "" if dpi_ok else f"DPI сейчас недоступен: {dpi_reason}. Проверьте bin/winws.exe и поставляемые с ним файлы WinDivert.",
         },
     }
     return data.get(ui_mode, data["dns_only"])
@@ -1226,8 +1240,8 @@ def resolve_doh(domain: str, doh_url: str, timeout: float = 5.0):
             ips = [a["data"] for a in resp.json().get("Answer", []) if a.get("type") == 1]
             if ips:
                 return ips, ms
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Диагностический DoH-запрос не удался; пробуем резервный путь', exc, level=logging.DEBUG)
     # wireformat
     try:
         t0 = time.perf_counter()
@@ -1325,8 +1339,8 @@ def transport_available(mode: str) -> tuple[bool, str]:
             prof = get_active_dns_profile(get_engine().config)
             if not (prof or {}).get("dnscrypt_stamp"):
                 return True, "Нужно выбрать DNSCrypt-резолвер (sdns://)"
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось проверить выбранный DNSCrypt-профиль', exc, level=logging.WARNING)
         return True, ""
     return False, "Неизвестный транспорт"
 
@@ -1347,8 +1361,8 @@ _UI_STATE_FILE = _os.path.join(_APP_DIR, "umbranet_ui.json")
 if _ui_state is not None:
     try:
         _UI_STATE_FILE = _ui_state.state_path()
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось определить путь состояния UI; используем стандартный', exc, level=logging.DEBUG)
 
 
 # P1-2: файл состояния UI — общий с theme.py, поэтому читаем и пишем только
@@ -1365,16 +1379,36 @@ def _load_ui_state() -> dict:
 def _save_ui_state(state: dict) -> None:
     try:
         _ui_state.save_state(state)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось сохранить состояние UI', exc, level=logging.WARNING)
 
 
 def _patch_ui_state(key: str, value) -> None:
     """Меняет один ключ, не затирая остальные (в т.ч. тему из theme.py)."""
     try:
         _ui_state.update_state(**{key: value})
-    except Exception:
-        pass
+    except Exception as exc:
+        log_recoverable(log, 'Не удалось обновить состояние UI', exc, level=logging.WARNING)
+
+
+_update_checker = None
+
+
+def get_update_checker():
+    """Shared notification-only checker, created from the GUI thread."""
+    global _update_checker
+    if _update_checker is None:
+        from core.update_checker import UpdateChecker
+        from umbranet import __version__
+        _update_checker = UpdateChecker(
+            __version__, include_prereleases=bool(_load_ui_state().get("update_prereleases", False))
+        )
+    return _update_checker
+
+
+def set_update_channel(include_prereleases: bool) -> None:
+    get_update_checker().set_channel(include_prereleases)
+    _patch_ui_state("update_prereleases", bool(include_prereleases))
 
 
 def auto_transport_enabled() -> bool:
@@ -2266,6 +2300,7 @@ def health_score() -> dict:
 def full_diagnostics_report() -> str:
     """Полный текстовый отчёт UmbraNet для копирования."""
     import datetime
+    from umbranet import __version__
     eng = get_engine()
     cfg = getattr(eng, "config", {}) or {}
     hs = health_score()
@@ -2273,6 +2308,7 @@ def full_diagnostics_report() -> str:
     lines = [
         "UmbraNet Full Diagnostic Report",
         "=" * 52,
+        f"version: {__version__}",
         f"time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"health: {hs.get('score')}/100 — {hs.get('title')}",
         f"real_engine: {is_real_engine()}",
@@ -2352,8 +2388,8 @@ def network_repair_soft(level: str = "soft") -> dict:
                 rcode="OK" if report.get("ok") else "FAIL",
                 note=(report.get("after") or {}).get("title") or "; ".join(report.get("errors") or []) or "готово",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось записать результат восстановления DNS в журнал запросов', exc, level=logging.DEBUG)
         return report
     except Exception as exc:
         return {"ok": False, "errors": [str(exc)], "steps": [], "before": {}, "after": {}}
@@ -2375,8 +2411,8 @@ def network_restore_latest() -> tuple[bool, str]:
                 rcode="OK" if ok else "FAIL",
                 note=msg,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось записать результат сброса DNS в журнал запросов', exc, level=logging.DEBUG)
         return ok, msg
     except Exception as exc:
         return False, str(exc)
@@ -2709,8 +2745,8 @@ def dpi_strategy_ai_cleanup_runtime() -> dict:
         eng = get_engine()
         try:
             eng._manual_stop_requested = True
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось установить флаг ручной остановки движка', exc, level=logging.WARNING)
         w2 = getattr(eng, "winws", None)
         if w2 and hasattr(w2, "is_running") and w2.is_running():
             w2.stop()
@@ -2772,8 +2808,8 @@ def _dpi_generation_preflight(winws, progress) -> dict:
                 for note in result["warnings"]:
                     try:
                         progress(f"AI-генерация: внимание — {note}")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_recoverable(log, 'Не удалось передать предупреждение AI-генерации в UI', exc, level=logging.DEBUG)
                 result["abort"] = True
                 result["reason"] = (
                     "Нет разрешения имён: www.youtube.com не резолвится "
@@ -2786,8 +2822,8 @@ def _dpi_generation_preflight(winws, progress) -> dict:
                 )
                 try:
                     progress(f"AI-генерация: остановлена до старта — {result['reason']}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_recoverable(log, 'Не удалось передать причину отмены AI-генерации в UI', exc, level=logging.DEBUG)
                 return result
             result["warnings"].append("DNS не отвечал: восстановили настройки из снапшота и продолжили")
     except Exception as exc:
@@ -2805,8 +2841,8 @@ def _dpi_generation_preflight(winws, progress) -> dict:
     for note in result["warnings"]:
         try:
             progress(f"AI-генерация: внимание — {note}")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось передать предупреждение AI-генерации в UI', exc, level=logging.DEBUG)
     return result
 
 
@@ -2846,8 +2882,8 @@ def dpi_strategy_ai_run_controlled(mode: str = "quick", on_progress=None, should
         try:
             if on_progress:
                 on_progress(str(text))
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось передать прогресс AI-генерации в UI', exc, level=logging.DEBUG)
 
     def cancelled() -> bool:
         try:
@@ -2944,8 +2980,8 @@ def dpi_strategy_ai_run_controlled(mode: str = "quick", on_progress=None, should
                 if cancelled():
                     try:
                         winws.stop()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_recoverable(log, 'Не удалось остановить WinWS после отмены генерации', exc, level=logging.ERROR)
                     progress("AI-генерация: отменена пользователем")
                     return {"ok": False, "stage": "ai_generation", "cancelled": True, "error": "генерация отменена", "created_id": "", "scores": scores}
                 if not started:
@@ -3103,8 +3139,8 @@ def dpi_strategy_check_all_controlled(on_progress=None, should_cancel=None) -> d
         try:
             if on_progress:
                 on_progress(str(text))
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Не удалось передать прогресс проверки стратегии в UI', exc, level=logging.DEBUG)
 
     def cancelled() -> bool:
         try:
@@ -3262,8 +3298,8 @@ def _dpi_next_order(strategies_dir, existing_count: int) -> int:
                 order = raw.get("order")
                 if isinstance(order, (int, float)):
                     max_order = max(max_order, int(order))
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось прочитать порядок стратегии; используется резервный', exc, level=logging.DEBUG)
         return max_order + 1
     except Exception:
         return int(existing_count or 0) + 1
@@ -3285,8 +3321,8 @@ def _dpi_strategy_path(manager, sid: str):
             raw = json.loads(path.read_text(encoding="utf-8"))
             if str(raw.get("id", "")).strip().lower() == sid:
                 return path
-        except Exception:
-            pass
+        except Exception as exc:
+            log_recoverable(log, 'Пропущен нечитаемый файл стратегии при поиске', exc, level=logging.DEBUG)
     return direct
 
 
@@ -3313,8 +3349,8 @@ def dpi_strategy_items() -> list[dict]:
                 order = raw.get("order")
                 created_at = str(raw.get("created_at", ""))
                 generation = raw.get("generation") if isinstance(raw.get("generation"), dict) else {}
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось прочитать метаданные стратегии', exc, level=logging.WARNING)
             score_obj = generation.get("score") if isinstance(generation.get("score"), dict) else {}
             service_scores = generation.get("service_scores") if isinstance(generation.get("service_scores"), dict) else {}
             if not service_scores and isinstance(score_obj.get("service_scores"), dict):
@@ -3481,8 +3517,8 @@ def dpi_strategy_delete(strategy_id: str) -> tuple[bool, str]:
             try:
                 save_config(cfg)
                 eng.config = cfg
-            except Exception:
-                pass
+            except Exception as exc:
+                log_recoverable(log, 'Не удалось сохранить выбор стратегии после удаления', exc, level=logging.ERROR)
         post_event({"type": "config_changed", "section": "dpi_strategies"})
         return True, f"Стратегия {sid} удалена"
     except Exception as exc:

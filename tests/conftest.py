@@ -16,6 +16,28 @@ for p in (CORE, DNS, DPI, os.path.join(DPI, "ai_strategy"), ROOT):
 import pytest
 
 
+MAX_TEST_ID_LENGTH = 512
+
+
+def pytest_collection_modifyitems(items):
+    """Fail before verbose reporting can print a multi-megabyte parameter ID.
+
+    Keep the full payload in the test; use pytest.param(..., id="over-5MiB")
+    instead of letting pytest derive a name from that payload. The diagnostic
+    itself is bounded, including when several such parameters were collected.
+    """
+    oversized = [item for item in items if len(item.nodeid) > MAX_TEST_ID_LENGTH]
+    if oversized:
+        details = "; ".join(
+            f"{item.nodeid[:120]}... ({len(item.nodeid)} characters)"
+            for item in oversized[:3]
+        )
+        raise pytest.UsageError(
+            f"{len(oversized)} test IDs exceed {MAX_TEST_ID_LENGTH} characters. "
+            f"Add short explicit pytest.param(..., id=...) names. {details}"
+        )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_geo_cache_session(tmp_path_factory):
     """Путь кэша гео подменяется ОДИН раз на весь прогон, а не на каждый тест.
@@ -200,3 +222,19 @@ def _isolated_ui_state(tmp_path_factory, monkeypatch):
         ui_state.set_state_path(None)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _offline_gui_background_updates(monkeypatch):
+    """GUI geometry tests must not launch production update requests/timers.
+
+    Only GUI entry points are disabled. Scheduler, download and release-checker
+    tests exercise the real core methods with their own fake clocks/network.
+    Manual UI update controls are separately tested with a fake checker.
+    """
+    try:
+        from umbranet.app import MainWindow
+    except ImportError:  # headless test environment without Qt system libraries
+        return
+    monkeypatch.setattr(MainWindow, "_start_background_updates", lambda self: None)
+    monkeypatch.setattr(MainWindow, "_check_program_updates", lambda self: None)

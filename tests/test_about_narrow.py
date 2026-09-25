@@ -198,21 +198,49 @@ def test_no_horizontal_scroll(window, about_view):
     assert not problems, "; ".join(problems[:5])
 
 
-def test_content_fits_page_width(window, about_view):
-    """Правый край подписей и кнопок не выходит за границу содержимого."""
-    problems = []
-    for width in (560, 700, 900, 1280):
-        set_width(window, width)
-        _, body = page_parts(about_view)
-        limit = body.width()
-        for child in body.findChildren(QLabel) + body.findChildren(QPushButton):
-            pos = child.mapTo(body, child.rect().topLeft())
-            if pos.x() + child.width() > limit + 1:
-                problems.append(
-                    f"окно={width}: «{child.text()[:26]}» вылез "
-                    f"({pos.x() + child.width()} > {limit})"
-                )
-    assert not problems, "элементы вылезают за содержимое: " + "; ".join(problems[:5])
+@pytest.mark.parametrize("state", ["idle", "checking", "available", "current", "no_releases", "error"])
+def test_content_fits_page_width(window, about_view, monkeypatch, state):
+    """Visible content fits, including the release button when an update exists.
+
+    Qt excludes hidden widgets from layout; a never-shown button can still have
+    its default 640px geometry. That is not visible overflow. Test every update
+    state so ignoring hidden widgets cannot hide an oversized *visible* button.
+    """
+    from unittest.mock import Mock
+    from core.update_checker import UpdateResult
+    from umbranet.views import about
+
+    checker = Mock()
+    checker.busy = state == "checking"
+    checker.result = UpdateResult(
+        state, "0.4.0" if state == "available" else "",
+        "https://github.com/302XXX/UmbraNet/releases/tag/v0.4.0" if state == "available" else "",
+        "Доступна версия 0.4.0. Установка вручную." if state == "available" else "Проверка обновлений: " + state,
+    )
+    monkeypatch.setattr(about.ea, "get_update_checker", lambda: checker)
+    about_view._refresh_update_status()
+    try:
+        problems = []
+        for width in (560, 700, 900, 1280):
+            set_width(window, width)
+            _, body = page_parts(about_view)
+            assert about_view._open_release.isVisibleTo(body) == (state == "available")
+            limit = body.width()
+            for child in body.findChildren(QLabel) + body.findChildren(QPushButton):
+                if not child.isVisibleTo(body):
+                    continue
+                pos = child.mapTo(body, child.rect().topLeft())
+                if pos.x() < 0 or pos.x() + child.width() > limit + 1:
+                    problems.append(
+                        f"окно={width}, состояние={state}: «{child.text()[:26]}» вылез "
+                        f"({pos.x() + child.width()} > {limit})"
+                    )
+        assert not problems, "элементы вылезают за содержимое: " + "; ".join(problems[:5])
+    finally:
+        # The page is shared by this module's tests; leave it in its initial state.
+        checker.result = UpdateResult()
+        checker.busy = False
+        about_view._refresh_update_status()
 
 
 def test_cards_do_not_ride_over_each_other(window, about_view):

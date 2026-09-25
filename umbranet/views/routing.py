@@ -1174,11 +1174,7 @@ class RoutingView(QWidget):
 
         # ── ПРОВЕРКА НА ПОДПИСКУ (URL) ──
         if raw_text.lower().startswith(("http://", "https://")):
-            cfg = self.engine.config
-            subs = cfg.setdefault("routed_subscriptions", [])
-            if raw_text not in subs:
-                subs.append(raw_text)
-                save_config(cfg)
+            if self.engine.change_subscription(raw_text):
                 self.add_input.setEnabled(False)
                 self.add_input.setPlaceholderText("⏳  Загрузка подписки...")
 
@@ -1188,7 +1184,7 @@ class RoutingView(QWidget):
                     self._subscription_done.emit(bool(ok), int(count), True)
 
                 update_subscriptions_async(on_done)
-                return
+            return  # An existing subscription must not fall through as a domain.
 
         import re
         tokens = re.split(r'[\s,;\n]+', raw_text)
@@ -1234,17 +1230,15 @@ class RoutingView(QWidget):
         if key == "routed_processes" and is_protected_process(name):
             # Тихо игнорируем — не даём удалить, чтобы не было проблем
             return
+        if key == "routed_subscriptions":
+            self._remove_subscription(name)
+            return
         if name in self.engine.config.get(key, []):
             self.engine.config[key].remove(name)
         self._apply()
 
     def _remove_subscription(self, url: str):
-        cfg = self.engine.config
-        subs = cfg.get("routed_subscriptions", [])
-        if url in subs:
-            subs.remove(url)
-            save_config(cfg)
-
+        if self.engine.change_subscription(url, remove=True):
             self.add_input.setEnabled(False)
             self.add_input.setPlaceholderText("⏳  Удаление подписки...")
 

@@ -5,12 +5,14 @@ name: CI
 # гонять в песочнице, и там ловятся вещи, которые на Windows незаметны:
 # регистр имён файлов, пути, кодировка вывода).
 #
-# Запускается на каждый push и на pull request — чтобы поломка находилась
+# Feature branches run through pull_request; main also runs after merge.
+# Do not run the same matrix twice for a push to an open PR.
+# Запускается на pull request и push в main — чтобы поломка находилась
 # автоматически, а не по факту прогона пользователем.
 
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
   workflow_dispatch:
 
@@ -23,11 +25,12 @@ jobs:
   tests:
     name: Тесты (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false        # падение на Windows не должно скрывать результат Linux
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.10", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +41,30 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
+            constraints.txt
             requirements-dev.txt
 
       - name: Установка зависимостей
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      # Reproduce the reported failure with an already-created Python 3.14 venv.
+      # A second run checks that install.bat can safely reuse that environment.
+      - name: Windows installer (Python 3.14, existing venv and repeat run)
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: cmd
+        env:
+          UMBRANET_INSTALL_NO_PAUSE: "1"
+        run: |
+          python -m venv .venv
+          if errorlevel 1 exit /b 1
+          call install.bat
+          if errorlevel 1 exit /b 1
+          call install.bat
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python.exe -c "import sys; assert sys.version_info[:2] == (3, 14)"
+          if errorlevel 1 exit /b 1
 
       # PySide6 в offscreen-режиме тянет системные библиотеки. В ubuntu-latest
       # их нет «из коробки» — без этого шага тесты интерфейса падают на импорте.
@@ -81,9 +102,14 @@ jobs:
         run: |
           # RUNNER запускает bash с -e (errexit), поэтому «python ... || code=$?»
           # — иначе при любом ненулевом коде сценарий умрёт до записи отчёта.
-          python -m pytest tests -q -rf --tb=short > pytest_output.txt 2>&1 || code=$?
-          code=${code:-0}
-          cat pytest_output.txt
+          # Stream the current test live. A blocked native Qt event loop needs
+          # the thread timeout method on Windows (signals cannot interrupt it).
+          set +e
+          python -m pytest tests -o addopts= -vv -rf --tb=short \
+            --timeout=120 --timeout-method=thread --durations=20 \
+            --junitxml=pytest_report.xml 2>&1 | tee pytest_output.txt
+          code=${PIPESTATUS[0]}
+          set -e
           if [ "$code" -ne 0 ]; then
             # Хвост лога в сводку шага (вкладка Summary).
             {
@@ -95,7 +121,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             # Плюс аннотации в Checks: без логов видно, какие тесты упали
             # и последние строки перед падением.
-            grep -E "^(FAILED|ERROR)" pytest_output.txt | head -n 10 | while IFS= read -r line; do
+            { grep -E "^(FAILED|ERROR)" pytest_output.txt || true; } | head -n 10 | while IFS= read -r line; do
               echo "::error file=tests::${line}"
             done
             tail -n 20 pytest_output.txt | while IFS= read -r line; do
@@ -124,3 +150,14 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Сохранить результаты тестов
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            pytest_output.txt
+            pytest_report.xml
+          if-no-files-found: ignore
+          retention-days: 7

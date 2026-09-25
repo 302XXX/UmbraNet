@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
     "xbox_dns_mode": "doh",
     # UI-режим работы:
     #   off    — DNS Only: локальный DNS + маршрутизация, DPI выключен
-    #   combo  — DNS + DPI combo (если pydivert/WinDivert доступны)
+    #   combo  — DNS + DPI combo (если WinWS/WinDivert доступны)
     #   zapret — DPI Only: DNS нужен для резолва, DPI в более агрессивном режиме
     "dpi_mode": "off",
     # Выбранный метод DPI/WinWS. Uz-стратегии — это только способ обхода;

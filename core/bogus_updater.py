@@ -38,6 +38,9 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+
+from core.diagnostics import log_recoverable
 from urllib.parse import urlsplit
 
 log = logging.getLogger("UmbraNet.BogusUpdater")
@@ -150,7 +153,7 @@ def _cache_path(config_dir: str) -> str:
     return os.path.join(config_dir, CACHE_FILENAME)
 
 
-def _save_cache(config_dir: str, ips: list[str], subnets: list[str]) -> None:
+def _save_cache(config_dir: str, ips: list[str], subnets: list[str]) -> bool:
     """Сохраняет актуальный список на диск для офлайн-запуска (атомарно + бэкап)."""
     path = _cache_path(config_dir)
     try:
@@ -180,8 +183,10 @@ def _save_cache(config_dir: str, ips: list[str], subnets: list[str]) -> None:
             except OSError:
                 pass
         log.debug("Диск-кэш bogus-IP сохранён: %d IP, %d подсетей", len(ips), len(subnets))
+        return True
     except Exception as exc:
         log.warning("Не удалось сохранить кэш bogus-IP: %s", exc)
+        return False
 
 
 def load_cached(config_dir: str) -> tuple[list[str], list[str]]:
@@ -268,14 +273,21 @@ def _fetch_remote(url: str, timeout: float = HTTP_TIMEOUT) -> bytes:
         headers={"User-Agent": "UmbraNet/1.0 bogus-ip-updater"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 - scheme validated above
-        return resp.read()
+        return resp.read(2 * 1024 * 1024 + 1)
 
 
 # ── Основной класс ────────────────────────────────────────────────────────────
 
+@dataclass
+class PeriodicTask:
+    name: str
+    callback: Callable[[], bool]
+    next_due: float = 0.0
+
+
 class BogusUpdater:
     """
-    Фоновый обновлятель списка bogus-IP.
+    Фоновый обновлятель bogus-IP и независимых периодических задач.
 
     Использование:
         updater = BogusUpdater(
@@ -310,11 +322,18 @@ class BogusUpdater:
         self._stop_event = threading.Event()
         self._last_success: float = 0.0
         self._lock = threading.Lock()
+        self._update_lock = threading.Lock()
+        self._restart_requested = False
+        self._tasks = [PeriodicTask("bogus-IP", self._try_update)]
 
     def start(self) -> None:
         """Запускает фоновый поток обновления."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                # stop() may still be waiting for a bounded network request.
+                # Restart once that worker exits, never create two schedulers.
+                if self._stop_event.is_set():
+                    self._restart_requested = True
                 return
             self._stop_event.clear()
             self._thread = threading.Thread(
@@ -327,130 +346,112 @@ class BogusUpdater:
 
     def stop(self) -> None:
         """Останавливает фоновый поток (ждёт не более 2 сек)."""
-        self._stop_event.set()
         with self._lock:
+            self._restart_requested = False
+            self._stop_event.set()
             t = self._thread
-        if t is not None:
+        if t is not None and t is not threading.current_thread():
             t.join(timeout=2.0)
-        log.debug("BogusUpdater остановлен")
+        log.debug("BogusUpdater: остановка запрошена")
 
     # ── Внутренняя логика ────────────────────────────────────────────────────
 
-    def _loop(self) -> None:
-        """Главный цикл фонового потока."""
-        # При первом запуске сразу пробуем обновиться
-        self._try_update()
+    def add_task(self, name: str, callback: Callable[[], bool]) -> None:
+        """Register before start; True = 24h, False/exception = retry in 1h.
 
-        while not self._stop_event.wait(timeout=60.0):
-            now = time.time()
-            elapsed = now - self._last_success
-            if elapsed >= self.interval:
-                self._try_update()
-
-    def _try_update(self) -> None:
-        """Одна попытка обновить список.
-
-        Стратегия (offline-first):
-          1. Читаем локальный бандл bogus_ips_remote.json из корня программы —
-             работает без сети, всегда актуален на момент установки.
-          2. Пробуем скачать более свежую версию с GitHub (может не сработать
-             при отсутствии сети — это нормально, не ошибка).
-          Применяем лучший из двух источников (сетевой приоритетнее если он свежее).
+        Callbacks are synchronous and must bound their network requests. One
+        task failing never prevents the remaining tasks from running.
         """
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("Register tasks before starting the updater")
+            if any(task.name == name for task in self._tasks):
+                raise ValueError("Duplicate periodic task")
+            self._tasks.append(PeriodicTask(name, callback))
+
+    def _run_due(self) -> None:
+        for task in self._tasks:
+            if self._stop_event.is_set():
+                break
+            if time.monotonic() < task.next_due:
+                continue
+            try:
+                ok = bool(task.callback())
+            except Exception as exc:
+                log_recoverable(log, "Ошибка фонового обновления " + task.name,
+                                exc, level=logging.WARNING)
+                ok = False
+            task.next_due = time.monotonic() + (self.interval if ok else RETRY_INTERVAL)
+
+    def _loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                self._run_due()
+                delay = min(task.next_due for task in self._tasks) - time.monotonic()
+                self._stop_event.wait(max(0.1, min(60.0, delay)))
+        finally:
+            # Lifecycle transition under the same lock as start/stop. Starting
+            # the replacement here avoids a lost restart during DNS reconnect.
+            with self._lock:
+                self._thread = None
+                if self._restart_requested:
+                    self._restart_requested = False
+                    self._stop_event.clear()
+                    self._thread = threading.Thread(
+                        target=self._loop, name="UmbraNet-BogusUpdater", daemon=True
+                    )
+                    self._thread.start()
+
+    def _try_update(self) -> bool:
+        # The local fallback is usable, but is NOT a successful network refresh.
+        with self._update_lock:
+            network_ok, _ = self._update_once()
+            return network_ok
+
+    def _update_once(self) -> tuple[bool, bool]:
+        """Network -> last disk cache -> bundle. Never overwrite cache offline."""
+        network_ok = False
         ips, subnets = [], []
-        source = "none"
-
-        # ── Шаг 1: локальный бандл ───────────────────────────────────────────
-        local = _load_from_local()
-        if local:
-            ips, subnets = local
-            source = "local"
-
-        # ── Шаг 2: сетевое обновление (опционально) ──────────────────────────
-        log.debug("BogusUpdater: попытка сетевого обновления с %s", self.url)
         try:
             data = _fetch_remote(self.url, timeout=HTTP_TIMEOUT)
-            net_ips, net_subnets = _parse_remote_json(data, strict=True)
-            if net_ips or net_subnets:
-                ips, subnets = net_ips, net_subnets
-                source = "network"
-                log.debug("BogusUpdater: сетевой список получен, приоритет над локальным")
-        except urllib.error.URLError as exc:
-            log.debug("BogusUpdater: сеть недоступна (%s)", exc.reason)
-        except TimeoutError:
-            log.debug("BogusUpdater: таймаут сетевого запроса")
-        except ValueError as exc:
-            log.warning("BogusUpdater: невалидный сетевой ответ: %s", exc)
+            ips, subnets = _parse_remote_json(data, strict=True)
+            network_ok = True
         except Exception as exc:
-            log.debug("BogusUpdater: сетевая ошибка: %s", exc)
+            log_recoverable(log, "Bogus-IP: сетевое обновление недоступно", exc)
 
-        # ── Применяем результат ───────────────────────────────────────────────
+        if network_ok:
+            if not _save_cache(self.config_dir, ips, subnets):
+                return False, False
+            self._last_success = time.time()
+        else:
+            ips, subnets = load_cached(self.config_dir)
+            if not ips and not subnets:
+                ips, subnets = _load_from_local() or ([], [])
+                if ips or subnets:
+                    # Resolver reads the disk cache, so bootstrap it once.
+                    if not _save_cache(self.config_dir, ips, subnets):
+                        return False, False
         if not ips and not subnets:
-            log.debug("BogusUpdater: нет данных ни из одного источника")
-            return
-
-        _save_cache(self.config_dir, ips, subnets)
-        self._last_success = time.time()
-
+            return False, False
         if self.on_update is not None:
             try:
                 self.on_update(ips, subnets)
             except Exception as exc:
-                log.error("BogusUpdater: ошибка в on_update callback: %s", exc)
-
-        log.info(
-            "BogusUpdater: список обновлён из [%s] — %d IP, %d подсетей",
-            source, len(ips), len(subnets),
-        )
+                log_recoverable(log, "Bogus-IP: ошибка применения списка", exc,
+                                level=logging.ERROR)
+                return False, False
+        log.debug("Bogus-IP применены: %d IP, %d подсетей; сеть=%s",
+                  len(ips), len(subnets), network_ok)
+        return network_ok, True
 
     @property
     def last_updated(self) -> float | None:
-        """Unix-timestamp последнего успешного обновления, или None."""
+        """Unix-timestamp последнего сетевого обновления этой сессии, или None."""
         return self._last_success or None
 
     def force_update(self) -> bool:
-        """
-        Принудительное обновление прямо сейчас (блокирующий вызов).
-        Вызывается из кнопки «Обновить список» в UI.
-
-        Стратегия (offline-first):
-          1. Читает локальный бандл — гарантирует успех даже без сети.
-          2. Пробует загрузить из сети — если удалось, использует сетевую версию.
-        Возвращает True если хотя бы один источник дал данные.
-        """
-        ips, subnets = [], []
-        source = "none"
-
-        # Шаг 1: локальный бандл (всегда пробуем)
-        local = _load_from_local()
-        if local:
-            ips, subnets = local
-            source = "local"
-
-        # Шаг 2: сеть (если доступна — заменяет локальный)
-        try:
-            data = _fetch_remote(self.url, timeout=HTTP_TIMEOUT)
-            net_ips, net_subnets = _parse_remote_json(data, strict=True)
-            if net_ips or net_subnets:
-                ips, subnets = net_ips, net_subnets
-                source = "network"
-        except Exception as exc:
-            log.debug("BogusUpdater: сеть при force_update недоступна: %s", exc)
-
-        if not ips and not subnets:
-            log.warning("BogusUpdater: force_update — нет данных ни из одного источника")
-            return False
-
-        _save_cache(self.config_dir, ips, subnets)
-        self._last_success = time.time()
-        if self.on_update is not None:
-            try:
-                self.on_update(ips, subnets)
-            except Exception as exc:
-                log.error("BogusUpdater: ошибка в on_update при force_update: %s", exc)
-
-        log.info(
-            "BogusUpdater: force_update выполнен из [%s] — %d IP, %d подсетей",
-            source, len(ips), len(subnets),
-        )
-        return True
+        """Blocking manual refresh; True also when an offline fallback is usable."""
+        # Shares a lock with the scheduler: no simultaneous cache writes.
+        with self._update_lock:
+            _, usable = self._update_once()
+            return usable

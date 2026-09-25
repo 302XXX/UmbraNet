@@ -1,17 +1,19 @@
-# UmbraNet - dependencies
-# Install:  pip install -r requirements.txt
+# UmbraNet runtime dependencies (Python 3.10–3.14, Windows x64)
+# Install: python -m pip install -r requirements.txt
+# Update direct pins and constraints.txt together, then run Linux/Windows CI.
+-c constraints.txt
 
 # GUI
-PySide6>=6.7.0
+PySide6==6.10.3
 
-# Core DNS / networking
-dnslib>=0.9.24
-requests>=2.28.0
-psutil>=5.9.0
+# DNS / networking
+dnslib==0.9.26
+requests==2.32.5
+psutil==7.1.0
 
-# Encrypted DNS transports
-aioquic>=1.0.0      # DoQ (DNS-over-QUIC)
-pynacl>=1.5.0       # DNSCrypt
+# Encrypted DNS
+aioquic==1.3.0
+pynacl==1.6.0
 
-# Optional DPI engine (Windows / WinDivert)
-# pydivert>=2.1.0
+# Release version comparison (PEP 440, including dev/rc versions)
+packaging==25.0
