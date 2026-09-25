@@ -60,11 +60,37 @@ WIDTHES = tuple(range(560, 1401, 20))
 @pytest.fixture(scope="module")
 def window():
     from umbranet.app import MainWindow
-    w = MainWindow()
-    w.show()
-    yield w
-    with suppress(RuntimeError):
-        w.close()
+    from umbranet.views.network import NetworkView
+
+    def fixed_health_report(view):
+        # This module tests geometry, not the CI runner's network. A healthy
+        # Windows host can return a short two-line message, while Linux returns
+        # longer warnings. Async completion also used to change the text between
+        # wide/narrow measurements. Use the real renderer with identical input.
+        view._on_health_ready({
+            "score": 60,
+            "state": "warn",
+            "title": "Проверка сетевого подключения",
+            "checks": [{
+                "status": "warn",
+                "title": "DNS-провайдер",
+                "detail": (
+                    "Проверьте доступность выбранного DNS-провайдера и параметры "
+                    "активного сетевого адаптера. Если соединение нестабильно, "
+                    "выполните диагностику и сохраните отчёт перед изменением настроек."
+                ),
+            }],
+        })
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(NetworkView, "_refresh_health_score", fixed_health_report)
+        w = MainWindow()
+        w.show()
+        try:
+            yield w
+        finally:
+            with suppress(RuntimeError):
+                w.close()
 
 
 def settle(times: int = 4) -> None:
@@ -129,11 +155,16 @@ def test_health_text_grows_with_content(window, net_view):
     Раньше высота была жёстко 42 px: всё, что длиннее двух строк, исчезало. Теперь
     это минимум, а не предел, поэтому в узком окне подпись выше, чем в широком.
     """
+    text = net_view._health_text.text()
     set_width(window, 1280)
     wide = net_view._health_text.height()
     set_width(window, 560)
     narrow = net_view._health_text.height()
+    needed = net_view._health_text.heightForWidth(net_view._health_text.width())
 
+    assert net_view._health_text.text() == text, "содержимое изменилось между измерениями"
+    assert needed > 42, "тест должен проверять текст длиннее прежних двух строк"
+    assert narrow >= needed - 1, "текст не помещается в рассчитанную высоту"
     assert narrow > 42, f"в узком окне текст остался в две строки ({narrow} px) — значит, режется"
     assert narrow > wide, f"высота не растёт с сужением: {wide} → {narrow}"
 

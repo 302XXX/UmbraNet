@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_requirements(name):
-    return [Requirement(line.strip()) for line in (ROOT / name).read_text().splitlines()
+    return [Requirement(line.strip()) for line in (ROOT / name).read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith(("#", "-"))]
 
 
@@ -16,11 +16,11 @@ def test_all_runtime_dependencies_and_constraints_are_exact():
             pins = list(requirement.specifier)
             assert len(pins) == 1 and pins[0].operator == "=="
             assert "*" not in pins[0].version
-    assert "-c constraints.txt" in (ROOT / "requirements.txt").read_text()
+    assert "-c constraints.txt" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
 
 def test_installer_uses_single_requirements_source_without_legacy_dpi():
-    installer = (ROOT / "install.bat").read_text()
+    installer = (ROOT / "install.bat").read_text(encoding="utf-8")
     commands = [line for line in installer.splitlines() if "pip install" in line]
     assert len(commands) == 2  # tooling bootstrap, then the single runtime list
     assert '-r "%APP_DIR%requirements.txt"' in commands[1]
