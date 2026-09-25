@@ -492,3 +492,38 @@ def test_app_hands_dns_restore_to_watchdog():
     src = (ROOT / "umbranet" / "app.py").read_text(encoding="utf-8")
     assert ("restore_needed = bool(reset_dns and self._dns_was_set_by_app and is_admin())"
             in src), "откат DNS обязан проверять, что DNS меняли именно мы"
+
+
+@pytest.mark.parametrize("after_hello", [False, True], ids=["before-hello", "after-hello"])
+def test_raw_fd_error_never_restores_dns(monkeypatch, after_hello):
+    """pythonw's raw-fd fallback must distinguish OSError from a real EOF."""
+    from unittest.mock import Mock
+    wd = _load_watchdog()
+    reads = ([b"HELLO\n"] if after_hello else []) + [OSError("broken pipe")] * wd.READ_RETRY_LIMIT
+    read = Mock(side_effect=reads)
+    restore = Mock()
+    monkeypatch.setattr(wd.os, "read", read)
+    with pytest.raises(wd.UnmonitoredError):
+        signal = wd.wait_for_parent(wd._FdStream(), sleep_fn=_no_sleep)
+        wd.handle_signal(signal, restore_fn=restore)
+    restore.assert_not_called()
+    assert read.call_count == len(reads)
+
+
+@pytest.mark.parametrize("reads,expected", [
+    pytest.param([b""], "restore", id="immediate-eof"),
+    pytest.param([b"HELLO\n", b""], "restore", id="eof-after-hello"),
+    pytest.param([b"HELLO\nCLEAN\n"], "skip", id="buffered-clean"),
+    pytest.param([b"HELLO\n", b"RESTORE\n"], "restore", id="explicit-restore"),
+    pytest.param([OSError("transient"), b"HELLO\nCLEAN\n"], "skip", id="recover-before-hello"),
+    pytest.param([b"HELLO\n", OSError("transient"), b"CLEAN\n"], "skip", id="recover-after-hello"),
+    pytest.param([b"HELLO\n", OSError("transient"), b""], "restore", id="error-then-real-eof"),
+])
+def test_raw_fd_real_signals_and_transient_errors(monkeypatch, reads, expected):
+    from unittest.mock import Mock
+    wd = _load_watchdog()
+    monkeypatch.setattr(wd.os, "read", Mock(side_effect=reads))
+    restore = Mock()
+    signal = wd.wait_for_parent(wd._FdStream(), sleep_fn=_no_sleep)
+    assert wd.handle_signal(signal, restore_fn=restore) == expected
+    assert restore.call_count == (1 if expected == "restore" else 0)

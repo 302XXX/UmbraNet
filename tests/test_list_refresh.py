@@ -17,6 +17,12 @@ def engine(tmp_path, monkeypatch):
     eng.config = {"routed_subscriptions": ["https://example.org/list?token=SECRET"],
                   "subscribed_domains_set": {"old.example"}}
     eng._subscriptions_lock = threading.Lock()
+    eng._subscription_state_lock = threading.RLock()
+    eng._subscriptions_generation = 0
+    eng._subscription_cache_valid = True
+    eng._cfg_ref = [eng.config]
+    eng.cache = Mock()
+    monkeypatch.setattr(dns, "save_config", lambda cfg: None)
     monkeypatch.setattr(dns, "_CORE_DIR", str(tmp_path))
     (tmp_path / "subscribed_domains_cache.json").write_text('["old.example"]')
     return eng
@@ -176,3 +182,187 @@ def test_subscription_url_lines_are_not_mistaken_for_comments(engine, monkeypatc
                         response(b"// comment\nhttps://example.org/path // comment\n"))
     assert engine._update_subscriptions()
     assert engine.config["subscribed_domains_set"] == {"example.org"}
+
+
+@pytest.mark.parametrize("urls", [[], ["https://example.org/replacement"]], ids=["remove", "replace"])
+def test_reload_during_cache_serialization_discards_download(engine, tmp_path, monkeypatch, urls):
+    """Reload after fetching, during disk preparation: old pre-write guard missed it."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: response(b"stale.example"))
+    monkeypatch.setattr(dns, "load_config", lambda: {"routed_subscriptions": list(urls)})
+    dump = dns.json.dump
+    def reload_during_write(*args, **kwargs):
+        dump(*args, **kwargs)
+        engine.reload_config()
+    monkeypatch.setattr(dns.json, "dump", reload_during_write)
+    assert not engine._update_subscriptions()
+    assert engine.config["routed_subscriptions"] == urls
+    assert engine.config["subscribed_domains_set"] == set()
+    assert engine._cfg_ref[0] is engine.config
+    assert not (tmp_path / "subscribed_domains_cache.json").exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_commit_and_reload_are_serialized(engine, tmp_path, monkeypatch):
+    """An actual second thread cannot reload between os.replace and memory publication."""
+    entered, release, reload_started = (threading.Event() for _ in range(3))
+    results, errors = [], []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: response(b"new.example"))
+    monkeypatch.setattr(dns, "load_config", lambda: {"routed_subscriptions": []})
+    replace = dns.os.replace
+    def paused_replace(*args):
+        entered.set()
+        assert release.wait(5)
+        replace(*args)
+    monkeypatch.setattr(dns.os, "replace", paused_replace)
+    def refresh():
+        try:
+            results.append(engine._update_subscriptions())
+        except BaseException as exc:
+            errors.append(exc)
+    def reload():
+        try:
+            reload_started.set()
+            engine.reload_config()
+        except BaseException as exc:
+            errors.append(exc)
+    worker = threading.Thread(target=refresh, daemon=True)
+    reloader = threading.Thread(target=reload, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        # Deterministic check, not a timing-sensitive sleep/negative event wait.
+        acquired = engine._subscription_state_lock.acquire(blocking=False)
+        if acquired:
+            engine._subscription_state_lock.release()
+        assert not acquired, "The state lock must cover both disk and memory publication"
+        reloader.start()
+        assert reload_started.wait(3)
+    finally:
+        release.set()
+        worker.join(5)
+        if reloader.ident is not None:
+            reloader.join(5)
+    assert not worker.is_alive() and not reloader.is_alive()
+    assert not errors
+    assert results == [True]
+    assert engine.config["routed_subscriptions"] == []
+    assert engine.config["subscribed_domains_set"] == set()
+    assert not (tmp_path / "subscribed_domains_cache.json").exists()
+
+
+def test_ui_removal_during_serialization_invalidates_download(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: response(b"stale.example"))
+    url = engine.config["routed_subscriptions"][0]
+    dump = dns.json.dump
+    def remove_during_write(*args, **kwargs):
+        dump(*args, **kwargs)
+        assert engine.change_subscription(url, remove=True)
+    monkeypatch.setattr(dns.json, "dump", remove_during_write)
+    assert not engine._update_subscriptions()
+    assert engine.config["routed_subscriptions"] == []
+    assert engine.config["subscribed_domains_set"] == set()
+    assert not (tmp_path / "subscribed_domains_cache.json").exists()
+
+
+def test_remove_and_readd_same_url_invalidates_old_generation(engine, tmp_path, monkeypatch):
+    url = engine.config["routed_subscriptions"][0]
+    def fetch(*args, **kwargs):
+        assert engine.change_subscription(url, remove=True)
+        assert engine.change_subscription(url)
+        return response(b"stale.example")
+    monkeypatch.setattr(urllib.request, "urlopen", fetch)
+    assert not engine._update_subscriptions()
+    assert engine.config["routed_subscriptions"] == [url]
+    assert engine.config["subscribed_domains_set"] == set()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_source_edit_does_not_wait_for_network(engine, monkeypatch):
+    entered, release, done = (threading.Event() for _ in range(3))
+    url = engine.config["routed_subscriptions"][0]
+    def fetch(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return response(b"stale.example")
+    monkeypatch.setattr(urllib.request, "urlopen", fetch)
+    results, edits = [], []
+    engine.update_subscriptions_async(lambda *r: (results.append(r), done.set()))
+    def edit():
+        edits.append(engine.change_subscription(url, remove=True))
+    worker = threading.Thread(target=edit, daemon=True)
+    try:
+        assert entered.wait(3)
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive(), "Editing sources must not wait for the download lock"
+        assert edits == [True]
+    finally:
+        release.set()
+        if worker.ident is not None:
+            worker.join(5)
+        assert done.wait(5)
+    assert results == [(False, 0)]
+
+
+def test_disabled_subscriptions_do_not_load_leftover_cache(engine):
+    engine.config["routed_subscriptions"] = []
+    engine.load_subscribed_domains()
+    assert engine.config["subscribed_domains_set"] == set()
+
+
+def test_failed_unlink_cannot_reload_obsolete_cache_in_session(engine, monkeypatch):
+    url = engine.config["routed_subscriptions"][0]
+    monkeypatch.setattr(dns.os, "remove", Mock(side_effect=PermissionError("locked cache")))
+    assert engine.change_subscription(url, remove=True)
+    assert engine.change_subscription("https://example.org/new-list")
+    engine.load_subscribed_domains()
+    assert engine.config["subscribed_domains_set"] == set()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: response(b"fresh.example"))
+    assert engine._update_subscriptions()
+    assert engine._subscription_cache_valid
+    engine.load_subscribed_domains()
+    assert engine.config["subscribed_domains_set"] == {"fresh.example"}
+
+
+def test_failed_cache_replace_preserves_old_memory_and_disk(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: response(b"new.example"))
+    monkeypatch.setattr(dns.os, "replace", Mock(side_effect=PermissionError("locked cache")))
+    assert not engine._update_subscriptions()
+    assert engine.config["subscribed_domains_set"] == {"old.example"}
+    assert json.loads((tmp_path / "subscribed_domains_cache.json").read_text()) == ["old.example"]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_unchanged_config_reload_keeps_offline_cache(engine, monkeypatch):
+    urls = list(engine.config["routed_subscriptions"])
+    monkeypatch.setattr(dns, "load_config", lambda: {"routed_subscriptions": urls})
+    engine.reload_config()
+    assert engine.config["subscribed_domains_set"] == {"old.example"}
+    assert engine._cfg_ref[0] is engine.config
+
+
+def test_duplicate_source_edits_are_noops(engine):
+    url = engine.config["routed_subscriptions"][0]
+    assert not engine.change_subscription(url)
+    assert not engine.change_subscription("https://example.org/missing", remove=True)
+    assert engine._subscriptions_generation == 0
+    assert engine.config["subscribed_domains_set"] == {"old.example"}
+
+
+def test_adding_source_keeps_working_cache_if_new_source_is_offline(engine, tmp_path, monkeypatch):
+    assert engine.change_subscription("https://example.org/new-list")
+    monkeypatch.setattr(urllib.request, "urlopen", Mock(side_effect=[response(b"new.example"), TimeoutError]))
+    assert not engine._update_subscriptions()
+    assert engine.config["subscribed_domains_set"] == {"old.example"}
+    assert json.loads((tmp_path / "subscribed_domains_cache.json").read_text()) == ["old.example"]
+
+
+def test_partial_source_removal_discards_aggregate_and_offline_cannot_restore_it(engine, tmp_path, monkeypatch):
+    old_url = engine.config["routed_subscriptions"][0]
+    assert engine.change_subscription("https://example.org/remaining")
+    assert engine.change_subscription(old_url, remove=True)
+    monkeypatch.setattr(urllib.request, "urlopen", Mock(side_effect=TimeoutError))
+    assert not engine._update_subscriptions()
+    engine.load_subscribed_domains()
+    assert engine.config["subscribed_domains_set"] == set()
+    assert not (tmp_path / "subscribed_domains_cache.json").exists()

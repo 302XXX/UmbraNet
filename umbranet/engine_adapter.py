@@ -95,6 +95,18 @@ class _StubEngine:
     def reload_config(self) -> None:
         pass
 
+    def change_subscription(self, url: str, *, remove: bool = False) -> bool:
+        urls = self.config.setdefault("routed_subscriptions", [])
+        if (url in urls) != remove:
+            return False
+        if remove:
+            urls.remove(url)
+        else:
+            urls.append(url)
+        if remove:
+            self.config["subscribed_domains_set"] = set()
+        return True
+
     def add_domain(self, d): self.config["routed_domains"].append(d.strip().lower())
     def remove_domain(self, d):
         if d in self.config["routed_domains"]:

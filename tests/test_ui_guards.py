@@ -272,3 +272,75 @@ def test_start_button_guard_requires_targets():
         win.close()
         win.deleteLater()
         app.processEvents()
+
+
+@pytest.mark.parametrize("remove", [False, True], ids=["add-subscription", "remove-subscription"])
+def test_subscription_ui_uses_engine_edit_api(monkeypatch, remove):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from umbranet import engine_adapter as adapter
+    from umbranet.views.routing import RoutingView
+    engine = adapter._StubEngine()
+    url = "https://example.org/subscription"
+    if remove:
+        engine.config["routed_subscriptions"] = [url]
+    engine.change_subscription = Mock(wraps=engine.change_subscription)
+    edit = QtWidgets.QLineEdit()
+    edit.setText(url)
+    signal = Mock()
+    view = SimpleNamespace(engine=engine, add_input=edit, _subscription_done=signal)
+    callbacks = []
+    monkeypatch.setattr(adapter, "update_subscriptions_async", callbacks.append)
+    try:
+        if remove:
+            RoutingView._remove_subscription(view, url)
+            engine.change_subscription.assert_called_once_with(url, remove=True)
+        else:
+            RoutingView._add_typed(view)
+            engine.change_subscription.assert_called_once_with(url)
+        assert engine.config["routed_subscriptions"] == ([] if remove else [url])
+        assert not edit.isEnabled()
+        assert len(callbacks) == 1
+        callbacks[0](True, 12)
+        signal.emit.assert_called_once_with(True, 12, not remove)
+    finally:
+        edit.deleteLater()
+        app.processEvents()
+
+
+def test_duplicate_subscription_does_not_become_manual_domain(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from umbranet import engine_adapter as adapter
+    from umbranet.views.routing import RoutingView
+    engine = adapter._StubEngine()
+    url = "https://example.org/subscription"
+    engine.config["routed_subscriptions"] = [url]
+    before = list(engine.config["routed_domains"])
+    edit = QtWidgets.QLineEdit(url)
+    view = SimpleNamespace(engine=engine, add_input=edit, _apply=Mock())
+    updater = Mock()
+    monkeypatch.setattr(adapter, "update_subscriptions_async", updater)
+    try:
+        RoutingView._add_typed(view)
+        assert engine.config["routed_domains"] == before
+        updater.assert_not_called()
+        view._apply.assert_not_called()
+        assert edit.isEnabled()
+    finally:
+        edit.deleteLater()
+        app.processEvents()
+
+
+def test_generic_remove_delegates_subscriptions_to_safe_handler():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    pytest.importorskip("PySide6.QtWidgets")
+    from umbranet.views.routing import RoutingView
+    view = SimpleNamespace(_remove_subscription=Mock())
+    RoutingView._remove(view, "https://example.org/list", "routed_subscriptions")
+    view._remove_subscription.assert_called_once_with("https://example.org/list")

@@ -1070,6 +1070,11 @@ class UmbraNetDNS:
     def __init__(self):
         self.config = load_config()
         self._subscriptions_lock = threading.Lock()
+        # Separate the long download lock from short state/commit transitions.
+        # Reload and UI source edits must use the same lock as cache publication.
+        self._subscription_state_lock = threading.RLock()
+        self._subscriptions_generation = 0
+        self._subscription_cache_valid = True
         self._cfg_ref = [self.config]
         self.cache = DNSCache()
         # DPI Engine (Обход блокировок на уровне пакетов)
@@ -1105,7 +1110,15 @@ class UmbraNetDNS:
         self.load_subscribed_domains()
 
     def load_subscribed_domains(self) -> None:
-        """Загружает закэшированные домены из подписок во внутренний set."""
+        """Load cache only for an enabled, still-valid subscription source set."""
+        with self._subscription_state_lock:
+            if (not self.config.get("routed_subscriptions") or
+                    not self._subscription_cache_valid):
+                self.config["subscribed_domains_set"] = set()
+                return
+            self._load_subscribed_domains_locked()
+
+    def _load_subscribed_domains_locked(self) -> None:
         path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
         if not os.path.exists(path):
             self.config["subscribed_domains_set"] = set()
@@ -1127,6 +1140,43 @@ class UmbraNetDNS:
         except Exception as exc:
             log.warning("Не удалось загрузить кэш подписок: %s", exc)
             self.config["subscribed_domains_set"] = set()
+
+    def _invalidate_subscription_cache_locked(self) -> bool:
+        """Discard an aggregate that may contain domains from removed sources.
+
+        Even if unlink fails, this session must not reload the obsolete file.
+        A successful refresh makes the cache valid again.
+        """
+        self._subscription_cache_valid = False
+        self.config["subscribed_domains_set"] = set()
+        self.cache.clear()
+        path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log_recoverable(log, "Не удалось удалить устаревший кэш подписок", exc,
+                            level=logging.WARNING)
+            return False
+        return True
+
+    def change_subscription(self, url: str, *, remove: bool = False) -> bool:
+        """UI source edit, serialized with reload and final cache publication."""
+        with self._subscription_state_lock:
+            urls = list(self.config.get("routed_subscriptions", []) or [])
+            if (url in urls) != remove:
+                return False
+            if remove:
+                urls.remove(url)
+            else:
+                urls.append(url)
+            self.config["routed_subscriptions"] = urls
+            self._subscriptions_generation += 1
+            if remove:
+                self._invalidate_subscription_cache_locked()
+            save_config(self.config)
+            return True
 
     def start_background_updates(self) -> None:
         """Shared startup path for GUI and headless DNS; start is idempotent."""
@@ -1181,8 +1231,10 @@ class UmbraNetDNS:
 
     def _fetch_subscriptions(self) -> bool:
         """Bounded fetch; keep the previous cache if any subscription fails."""
-        config_snapshot = self.config
-        urls = list(config_snapshot.get("routed_subscriptions", []) or [])
+        with self._subscription_state_lock:
+            config_snapshot = self.config
+            generation = self._subscriptions_generation
+            urls = list(config_snapshot.get("routed_subscriptions", []) or [])
         original_urls = list(urls)
         # H2: лимит количества подписок
         MAX_URLS = 10
@@ -1194,15 +1246,10 @@ class UmbraNetDNS:
             log.warning("Слишком много подписок (%d), берём первые %d", len(urls), MAX_URLS)
             urls = urls[:MAX_URLS]
         if not urls:
-            self.config["subscribed_domains_set"] = set()
-            path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception as exc:
-                    log_recoverable(log, 'Не удалось удалить кэш отключённых подписок', exc, level=logging.WARNING)
+            with self._subscription_state_lock:
+                if not self._subscription_snapshot_current(config_snapshot, generation, original_urls):
                     return False
-            return True
+                return self._invalidate_subscription_cache_locked()
 
         import urllib.request
         compiled_domains = set()
@@ -1306,27 +1353,29 @@ class UmbraNetDNS:
             log.warning("Кэш подписок сохранён: обновление не завершилось для всех URL")
             return False
 
-        # A manual edit/reload during download must not resurrect removed subscriptions.
-        if (self.config is not config_snapshot or
-                list(self.config.get("routed_subscriptions", []) or []) != original_urls):
-            log.info("Подписки изменены во время загрузки; результат отброшен")
-            return False
         path = os.path.join(_CORE_DIR, "subscribed_domains_cache.json")
         temp_path = f"{path}.{threading.get_ident()}.tmp"
         try:
-            # бэкап предыдущего кэша
-            if os.path.exists(path):
-                try:
-                    import shutil
-                    shutil.copy2(path, f"{path}.bak")
-                except Exception as exc:
-                    log_recoverable(log, 'Не удалось создать резервную копию кэша подписок', exc, level=logging.WARNING)
-            # Атомарная замена не оставляет битый JSON, если приложение
-            # завершится во время записи большого списка доменов.
+            # Network and serialization run WITHOUT the state lock: editing
+            # subscriptions/reloading config must not wait for a download.
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(list(compiled_domains), f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, path)
-            self.config["subscribed_domains_set"] = compiled_domains
+            with self._subscription_state_lock:
+                if not self._subscription_snapshot_current(config_snapshot, generation, original_urls):
+                    log.info("Подписки изменены во время обновления; результат отброшен")
+                    return False
+                if os.path.exists(path):
+                    try:
+                        import shutil
+                        shutil.copy2(path, f"{path}.bak")
+                    except Exception as exc:
+                        log_recoverable(log, 'Не удалось создать резервную копию кэша подписок', exc,
+                                        level=logging.WARNING)
+                # No reload or UI source edit can interleave these two writes.
+                os.replace(temp_path, path)
+                self.config["subscribed_domains_set"] = compiled_domains
+                self._subscription_cache_valid = True
+                self.cache.clear()
             log.info("Подписки успешно обновлены. Итого доменов в кэше: %d", len(compiled_domains))
             return True
         except Exception as exc:
@@ -1348,11 +1397,23 @@ class UmbraNetDNS:
             except Exception as exc:
                 log.debug("_on_bogus_update: ошибка сброса кэша: %s", exc)
 
+    def _subscription_snapshot_current(self, config, generation, urls) -> bool:
+        """Caller holds the state lock; generation also detects remove/add ABA."""
+        return (self.config is config and self._subscriptions_generation == generation and
+                list(self.config.get("routed_subscriptions", []) or []) == urls)
+
     def reload_config(self):
-        self.config = load_config()
-        self._cfg_ref[0] = self.config
-        self.load_subscribed_domains()
-        self.cache.clear()
+        with self._subscription_state_lock:
+            config = load_config()
+            self._subscriptions_generation += 1
+            old_sources = set(self.config.get("routed_subscriptions", []) or [])
+            new_sources = set(config.get("routed_subscriptions", []) or [])
+            if not old_sources.issubset(new_sources):
+                self._invalidate_subscription_cache_locked()
+            self.config = config
+            self.load_subscribed_domains()
+            self._cfg_ref[0] = self.config
+            self.cache.clear()
         log.info("Конфигурация перезагружена; DNS-кэш очищен")
 
     def start(self):
