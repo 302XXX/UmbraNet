@@ -435,20 +435,18 @@ class MainWindow(GlowContainer):
         self._ai_generation_pending = False
         self._strategy_check_pending = False
         
-        # Фоновое автообновление доменов блокировок (YouTube, Discord и др.) с GitHub
-        def _bg_update_domains():
-            try:
-                import threading as _threading
-                # Небольшая задержка, чтобы UI успел отрисоваться
-                _threading.Event().wait(3.0)
-                from core.dpi.domain_updater import update_all_strategies
-                from core.dpi.strategy_manager import get_strategy_manager
-                update_all_strategies(get_strategy_manager().strategies_dir)
-            except Exception as e:
-                log.debug(f"Ошибка фонового обновления доменов: {e}")
-                
-        import threading as _threading
-        _threading.Thread(target=_bg_update_domains, daemon=True, name="UmbraNet-DomainUpdater").start()
+        # One scheduler owns startup and periodic list refreshes. No GUI-only
+        # domain thread, no duplicate startup subscription download.
+        self._updates_start_timer = QTimer(self)
+        self._updates_start_timer.setSingleShot(True)
+        self._updates_start_timer.timeout.connect(self._start_background_updates)
+        self._updates_start_timer.start(3000)
+        self._notified_release = ""
+        self._release_timer = QTimer(self)
+        self._release_timer.setInterval(60_000)
+        self._release_timer.timeout.connect(self._check_program_updates)
+        self._release_timer.start()
+        self._updates_start_timer.timeout.connect(self._check_program_updates)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1705,7 +1703,7 @@ class MainWindow(GlowContainer):
             self.engine._manual_stop_requested = True
         except Exception:
             pass
-        for tname in ("_show_timer", "_event_timer", "_health_timer"):
+        for tname in ("_show_timer", "_event_timer", "_health_timer", "_updates_start_timer", "_release_timer"):
             try:
                 t = getattr(self, tname, None)
                 if t is not None:
@@ -1835,6 +1833,26 @@ class MainWindow(GlowContainer):
         # завершат из трея, размер уже должен быть сохранён.
         if getattr(self, "_initial_resize_done", False):
             self._save_window_geometry()
+
+    def _check_program_updates(self):
+        from umbranet.engine_adapter import get_update_checker
+        checker = get_update_checker()
+        result = checker.result
+        if result.state == "available" and result.version != self._notified_release:
+            self._notified_release = result.version
+            if self.tray:
+                self.tray.notify(
+                    f"Доступна UmbraNet {result.version}. Откройте «О программе» → «Обновления»."
+                )
+        checker.check_async()
+
+    def _start_background_updates(self):
+        try:
+            start = getattr(self.engine, "start_background_updates", None)
+            if start is not None:
+                start()
+        except Exception as exc:
+            log.warning("Не удалось запустить фоновые обновления (%s)", type(exc).__name__)
 
     def closeEvent(self, event):
         # Сохраняем размер/положение в любом случае: и при сворачивании в трей

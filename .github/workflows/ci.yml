@@ -27,7 +27,7 @@ jobs:
       fail-fast: false        # падение на Windows не должно скрывать результат Linux
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.10", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
+            constraints.txt
             requirements-dev.txt
 
       - name: Установка зависимостей

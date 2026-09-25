@@ -9,7 +9,7 @@ REM    2. Создаёт .venv рядом с программой
 REM    3. Обновляет pip/setuptools/wheel
 REM    4. Ставит ВСЕ компоненты DNS: PySide6, dnslib, requests, psutil,
 REM       aioquic (DoQ), pynacl (DNSCrypt)
-REM    5. Пытается поставить pydivert для DPI-режима
+REM    5. DPI использует поставляемый bin\winws.exe (WinWS + WinDivert)
 REM
 REM  Важно:
 REM    - chcp 65001 нужен, чтобы русские буквы не превращались в кракозябры.
@@ -125,13 +125,7 @@ echo  -----------------------------------------------
 echo   Установка обязательных компонентов
 echo   GUI + DNS + DoQ + DNSCrypt
 echo  -----------------------------------------------
-"%PY%" -m pip install --upgrade --no-cache-dir ^
-    "PySide6>=6.7.0" ^
-    "dnslib>=0.9.24" ^
-    "requests>=2.28.0" ^
-    "psutil>=5.9.0" ^
-    "aioquic>=1.0.0" ^
-    "pynacl>=1.5.0"
+"%PY%" -m pip install --upgrade --no-cache-dir -r "%APP_DIR%requirements.txt"
 if errorlevel 1 (
     echo.
     echo  [ОШИБКА] Не удалось установить обязательные компоненты.
@@ -155,26 +149,12 @@ if errorlevel 1 (
 REM ── Проверка импортов ────────────────────────────────────────────────
 echo.
 echo  Проверка установленных модулей ...
-"%PY%" -c "import PySide6, dnslib, requests, psutil, aioquic, nacl; print('OK: all required modules imported')"
+"%PY%" -c "import PySide6, dnslib, requests, psutil, aioquic, nacl, packaging; print('OK: all required modules imported')"
 if errorlevel 1 (
     echo  [ОШИБКА] Модули установились не полностью. Повторите install.bat.
     echo  Если ошибка повторяется, удалите папку .venv и запустите install.bat заново.
     pause
     exit /b 1
-)
-
-REM ── DPI dependency, пока не критично ─────────────────────────────────
-echo.
-echo  -----------------------------------------------
-echo   DPI-компонент pydivert ^(для DPI режима^)
-echo  -----------------------------------------------
-echo  Если установка pydivert не получится, DNS / DoH / DoQ / DNSCrypt всё равно работают.
-echo.
-"%PY%" -m pip install --upgrade --no-cache-dir "pydivert>=2.1.0"
-if errorlevel 1 (
-    echo  [ПРЕДУПРЕЖДЕНИЕ] pydivert не установлен. DPI-часть через pydivert будет недоступна.
-) else (
-    echo  [OK] pydivert установлен.
 )
 
 REM ── Итог ─────────────────────────────────────────────────────────────

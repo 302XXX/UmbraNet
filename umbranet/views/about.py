@@ -11,10 +11,11 @@ import platform
 import sys
 from importlib import metadata
 
-from PySide6.QtCore import Qt, qVersion
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Qt, QTimer, QUrl, qVersion
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QSizePolicy,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -36,7 +37,7 @@ _PACKAGE_NAMES = {
     "psutil": "psutil",
     "aioquic": "aioquic",
     "pynacl": "PyNaCl",
-    "pydivert": "pydivert",
+    "packaging": "packaging",
 }
 
 
@@ -113,6 +114,7 @@ class AboutView(QWidget):
         lay.setSpacing(14)
 
         lay.addWidget(self._build_hero())
+        lay.addWidget(self._build_updates())
         lay.addWidget(self._build_status())
         lay.addWidget(self._build_help())
         lay.addWidget(self._build_tech())
@@ -120,6 +122,11 @@ class AboutView(QWidget):
 
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
+        self._update_poll = QTimer(self)
+        self._update_poll.setInterval(1000)
+        self._update_poll.timeout.connect(self._refresh_update_status)
+        self._update_poll.start()
+        self._refresh_update_status()
 
     # ── UI blocks ────────────────────────────────────────────────────────────
     def _build_hero(self) -> QFrame:
@@ -157,6 +164,49 @@ class AboutView(QWidget):
         privacy.setStyleSheet(f"color:{theme.ACCENT3};font-size:12px;background:transparent;border:none;")
         lay.addWidget(privacy)
         return card
+
+    def _build_updates(self) -> QFrame:
+        card, lay = _card("Обновления программы")
+        self._release_status = _wrapped(QLabel(), 36)
+        self._release_status.setTextFormat(Qt.PlainText)
+        self._release_status.setStyleSheet(f"color:{theme.TEXT};font-size:12px;")
+        lay.addWidget(self._release_status)
+        self._prereleases = QCheckBox("Тестовый канал (предрелизы)")
+        self._prereleases.setStyleSheet(f"color:{theme.TEXT};font-size:12px;")
+        self._prereleases.setChecked(ea.get_update_checker().include_prereleases)
+        self._prereleases.toggled.connect(self._set_update_channel)
+        lay.addWidget(self._prereleases)
+        # Separate rows keep the card usable at the minimum window width.
+        self._check_release = self._small_btn("Проверить обновления", theme.ACCENT)
+        self._check_release.clicked.connect(self._check_updates)
+        lay.addWidget(self._check_release)
+        self._open_release = self._small_btn("Открыть страницу релиза", theme.ACCENT)
+        self._open_release.clicked.connect(self._open_update_release)
+        lay.addWidget(self._open_release)
+        note = _wrapped(QLabel("Файлы программы не скачиваются и не устанавливаются автоматически."), 32)
+        note.setStyleSheet(f"color:{theme.SUBTEXT};font-size:12px;")
+        lay.addWidget(note)
+        return card
+
+    def _refresh_update_status(self):
+        checker = ea.get_update_checker()
+        result = checker.result
+        self._release_status.setText(result.message)
+        self._check_release.setEnabled(not checker.busy)
+        self._open_release.setVisible(result.state == "available")
+
+    def _check_updates(self):
+        ea.get_update_checker().check_async(force=True)
+        self._refresh_update_status()
+
+    def _set_update_channel(self, enabled: bool):
+        ea.set_update_channel(enabled)
+        self._check_updates()
+
+    def _open_update_release(self):
+        result = ea.get_update_checker().result
+        if result.state == "available" and result.url:
+            QDesktopServices.openUrl(QUrl(result.url))
 
     def _build_status(self) -> QFrame:
         card, lay = _card("🧩  Состояние компонентов")
@@ -223,7 +273,7 @@ class AboutView(QWidget):
             ("psutil", _pkg_version(_PACKAGE_NAMES["psutil"])),
             ("aioquic", _pkg_version(_PACKAGE_NAMES["aioquic"])),
             ("PyNaCl", _pkg_version(_PACKAGE_NAMES["pynacl"])),
-            ("pydivert", _pkg_version(_PACKAGE_NAMES["pydivert"])),
+            ("packaging", _pkg_version(_PACKAGE_NAMES["packaging"])),
         ]
         for r, (name, value) in enumerate(rows):
             self._kv(self._tech_grid, r, name, value)
