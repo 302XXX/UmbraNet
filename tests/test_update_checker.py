@@ -69,7 +69,12 @@ def test_request_and_response(monkeypatch, channel, payload):
     assert opened.call_args.kwargs["timeout"] == 10
 
 
-@pytest.mark.parametrize("raw", [b"[]", b"{}", b"<html>error</html>", b"x" * (uc.MAX_RESPONSE + 1)])
+@pytest.mark.parametrize("raw", [
+    pytest.param(b"[]", id="array-not-object"),
+    pytest.param(b"{}", id="missing-tag"),
+    pytest.param(b"<html>error</html>", id="invalid-json"),
+    pytest.param(b"x" * (uc.MAX_RESPONSE + 1), id="over-2MiB"),
+])
 def test_invalid_response_is_not_reported_as_up_to_date(monkeypatch, raw):
     monkeypatch.setattr(uc.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(raw))
     with pytest.raises(ValueError):

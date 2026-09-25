@@ -133,7 +133,14 @@ def test_domain_cache_refresh_never_changes_strategy(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("*.tmp"))
 
 
-@pytest.mark.parametrize("raw", [b"", b"<html>example.org</html>", b"--dpi-desync=fake", b"x" * (du.MAX_BYTES + 1)])
+# Explicit IDs are essential: pytest otherwise puts the entire 5 MiB body in
+# the node ID and streams it as one enormous line in CI's verbose output.
+@pytest.mark.parametrize("raw", [
+    pytest.param(b"", id="empty"),
+    pytest.param(b"<html>example.org</html>", id="html"),
+    pytest.param(b"--dpi-desync=fake", id="winws-option"),
+    pytest.param(b"x" * (du.MAX_BYTES + 1), id="over-5MiB"),
+])
 def test_bad_remote_hostlist_preserves_working_file(tmp_path, monkeypatch, raw):
     strategy(tmp_path)
     cache = tmp_path / "remote_hostlist_test.txt"
