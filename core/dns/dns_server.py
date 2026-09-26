@@ -155,16 +155,48 @@ def _socket_address(server_ip: str, port: int):
     return (server_ip, port)
 
 
+def _probe_umbranet_dns_running(host: str, port: int) -> bool:
+    """Проверяет, слушает ли на host:port СОБСТВЕННЫЙ DNS UmbraNet.
+
+    Отправляет тестовый DNS-запрос и проверяет, что пришёл валидный ответ.
+    Это позволяет отличить «наш сервер ещё работает» от «порт занят чужой
+    программой» — не полагаясь только на флаг self.running.
+    """
+    try:
+        family = _ip_family(host)
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        sock.settimeout(1.0)
+        try:
+            q = DNSRecord.question("localhost", "A")
+            sock.sendto(q.pack(), _socket_address(host, port))
+            data, _ = sock.recvfrom(512)
+            resp = DNSRecord.parse(data)
+            # Если ID совпадает и это ответ — слушает наш DNSlib-сервер.
+            if resp.header.id == q.header.id and resp.header.qr:
+                return True
+        except Exception:
+            pass
+        finally:
+            sock.close()
+    except Exception:
+        pass
+    return False
+
+
 def check_port_available(host: str, port: int) -> tuple:
     """Проверяет, можно ли занять UDP-порт на host:port ДО запуска сервера.
 
     Возвращает (ok: bool, reason: str). reason пустой при ok=True.
     Проверяем именно UDP (основной транспорт DNS) — пытаемся забиндиться
     на короткое время. Если занято/нет прав — сообщаем по-человечески.
+
+    Особый случай: если на порту работает СОБСТВЕННЫЙ DNS UmbraNet — это не
+    конфликт, а штатный restart. Сервер будет остановлен перед новым запуском,
+    поэтому считаем порт доступным.
     """
     family = _ip_family(host)
-    
-    # Делаем 3 попытки с небольшой паузой — это защищает от ложных 
+
+    # Делаем 3 попытки с небольшой паузой — это защищает от ложных
     # срабатываний при быстром рестарте, когда ОС еще не успела освободить порт.
     import time
     for attempt in range(3):
@@ -187,6 +219,14 @@ def check_port_available(host: str, port: int) -> tuple:
                 if attempt < 2:
                     time.sleep(0.2)
                     continue
+                # ── Ключевая проверка: это НАШ собственный DNS? ────────
+                # После restart / stop→start флаг self.running может быть
+                # уже сброшен, но ОС ещё не освободила сокет. Или сервер
+                # работает, а preflight запустился по другой причине.
+                # В обоих случаях — это не конфликт: старый сервер будет
+                # остановлен перед запуском нового.
+                if _probe_umbranet_dns_running(host, port):
+                    return True, ""
                 return False, (
                     f"порт {port} уже занят другой программой "
                     f"(системный DNS-клиент, Pi-hole/AdGuard или второй экземпляр UmbraNet)"
@@ -194,7 +234,7 @@ def check_port_available(host: str, port: int) -> tuple:
             if winerr == 10013 or errno == 13:  # access denied
                 return False, f"нет прав на порт {port} (нужны права администратора)"
             return False, f"не удалось занять {host}:{port}: {exc}"
-            
+
     return False, "Неизвестная ошибка порта"
 
 
