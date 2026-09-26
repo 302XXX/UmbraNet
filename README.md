@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌘 UmbraNet
+# 👾 <a href="https://github.com/X-302-X">X-302-X/UmbraNet</a> 👾
 
 ### Защищённый DNS, диагностика и восстановление сети на Windows — в одном окне
 
