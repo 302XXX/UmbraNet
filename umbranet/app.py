@@ -870,10 +870,13 @@ class MainWindow(GlowContainer):
     def _begin_strategy_check_session(self):
         view = self._views.get("strategy_lab")
         try:
-            if self._strategy_check_worker and self._strategy_check_worker.isRunning():
-                if hasattr(view, "_generation_busy"):
-                    view._generation_busy()
-                return
+            if self._strategy_check_worker is not None:
+                if self._strategy_check_worker.isRunning():
+                    if hasattr(view, "_generation_busy"):
+                        view._generation_busy()
+                    return
+                # Worker завершился, но ссылка осталась — чистим.
+                self._strategy_check_worker = None
             self._busy = True
             if hasattr(self.control, "set_ai_busy"):
                 self.control.set_ai_busy()
@@ -898,7 +901,7 @@ class MainWindow(GlowContainer):
 
     def _on_strategy_check_cancel_requested(self):
         try:
-            w = getattr(self, "_strategy_check_worker", None)
+            w = self._strategy_check_worker
             if w is not None and w.isRunning():
                 if hasattr(w, "request_cancel"):
                     w.request_cancel()
@@ -908,6 +911,7 @@ class MainWindow(GlowContainer):
                 return
         except Exception as exc:  # noqa: BLE001
             log.warning("Strategy check cancel failed: %s", exc)
+        self._strategy_check_worker = None
         try:
             dpi_strategy_ai_cleanup_runtime()
         except Exception:
@@ -925,6 +929,8 @@ class MainWindow(GlowContainer):
             result["cleanup"] = cleanup
         except Exception as exc:
             result["cleanup"] = {"stopped": [], "errors": [str(exc)]}
+        # Сбрасываем ссылку на worker (см. комментарий в _on_ai_generation_done).
+        self._strategy_check_worker = None
         self._busy = False
         self._strategy_check_pending = False
         self.control.set_running(False, mode=get_current_mode())
@@ -962,10 +968,13 @@ class MainWindow(GlowContainer):
             plan = dpi_strategy_ai_plan("quick")
             if hasattr(view, "_generation_plan_ready"):
                 view._generation_plan_ready(plan)
-            if self._ai_generation_worker and self._ai_generation_worker.isRunning():
-                if hasattr(view, "_generation_busy"):
-                    view._generation_busy()
-                return
+            if self._ai_generation_worker is not None:
+                if self._ai_generation_worker.isRunning():
+                    if hasattr(view, "_generation_busy"):
+                        view._generation_busy()
+                    return
+                # Worker завершился, но ссылка осталась — чистим.
+                self._ai_generation_worker = None
             self._busy = True
             if hasattr(self.control, "set_ai_busy"):
                 self.control.set_ai_busy()
@@ -989,7 +998,7 @@ class MainWindow(GlowContainer):
     def _on_ai_generation_cancel_requested(self):
         """Отмена AI-генерации из UI: не закрываем программу, только DPI-session."""
         try:
-            w = getattr(self, "_ai_generation_worker", None)
+            w = self._ai_generation_worker
             if w is not None and w.isRunning():
                 if hasattr(w, "request_cancel"):
                     w.request_cancel()
@@ -1000,6 +1009,7 @@ class MainWindow(GlowContainer):
         except Exception as exc:  # noqa: BLE001
             log.warning("AI generation cancel failed: %s", exc)
         # Если worker уже завершился между кликом и обработкой — всё равно чистим DPI.
+        self._ai_generation_worker = None
         try:
             dpi_strategy_ai_cleanup_runtime()
         except Exception:
@@ -1026,6 +1036,11 @@ class MainWindow(GlowContainer):
         except Exception as exc:  # noqa: BLE001
             result["cleanup"] = {"stopped": [], "errors": [str(exc)]}
             log.warning("AI generation cleanup failed: %s", exc)
+        # Сбрасываем ссылку на worker: без этого isRunning() может кратковременно
+        # вернуть True (QThread ещё не обработал finished-сигнал), и повторный
+        # запуск генерации попадёт в guard «worker уже запущен» → _busy навсегда
+        # останется True → «вечная уборка».
+        self._ai_generation_worker = None
         self._busy = False
         self._ai_generation_pending = False
         self._strategy_check_pending = False
